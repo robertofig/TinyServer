@@ -826,6 +826,9 @@ CraftHttpResponseHeader(ts_response* Response, string* Header)
     AppendArrayToString(gServerName, Header);
     AppendStringToString(LineBreak, Header);
     
+    AppendStringToString(StrLit("Access-Control-Allow-Origin: *"), Header);
+    AppendStringToString(LineBreak, Header);
+    
     AppendStringToString(StrLit("Connection: "), Header);
     AppendStringToString(Response->KeepAlive ? StrLit("keep-alive") : StrLit("close"), Header);
     AppendStringToString(LineBreak, Header);

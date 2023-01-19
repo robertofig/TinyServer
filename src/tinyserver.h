@@ -161,8 +161,14 @@ bool (*CreateConn)(ts_io* Conn, void* DstSockAddr, u32 DstSockAddrSize, void* Bu
 
 bool (*DisconnectSocket)(ts_io* Conn);
 
-/* Gracefully disconnects the socket in [Conn], but leaves it ready for
- |  new connections. 
+/* Gracefully disconnects the socket in [Conn]. May leave the socket open
+ |  for new connections, depending on the implementation. Check socket
+|  handle upon return to see if it's still valid.
+|--- Return: true if successful, false if not. */
+
+bool (*TerminateConn)(ts_io* Conn);
+
+/* Gracefully disconnects the socket in [Conn] and closes it.
 |--- Return: true if successful, false if not. */
 
 bool (*SendPackets)(ts_io* Conn, void** Buffers, u32* BuffersSize, usz NumBuffers);

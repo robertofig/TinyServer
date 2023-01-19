@@ -65,6 +65,7 @@ InitServer(void)
     WSAIoctl(IoctlSocket, SIO_GET_EXTENSION_FUNCTION_POINTER, &GuidDisconnectEx, sizeof(GUID),
              &_DisconnectEx, sizeof(_DisconnectEx), &BytesReturned, NULL, NULL);
     DisconnectSocket = (_DisconnectEx) ? _DisconnectSocketEx : _DisconnectSocketSimple;
+    TerminateConn = _DisconnectSocketSimple;
     
     // TransmitPackets()
     GUID GuidTransmitPackets = WSAID_TRANSMITPACKETS;
@@ -318,7 +319,7 @@ _AcceptConnSimple(ts_listen Listening, ts_io* Conn, void* Buffer, u32 BufferSize
     if (Socket != INVALID_SOCKET)
     {
         Conn->Socket = (file)Socket;
-        if (AddFileToIoQueue(Conn->Socket, IoQueue))
+        if (!AddFileToIoQueue(Conn->Socket, IoQueue))
         {
             int Error = GetLastError();
             closesocket(Conn->Socket);
@@ -389,8 +390,10 @@ _CreateConnEx(ts_io* Conn, void* DstSockAddr, u32 DstSockAddrSize, void* Buffer,
 internal bool
 _DisconnectSocketSimple(ts_io* Conn)
 {
-    bool Result = shutdown((SOCKET)Conn->Socket, SD_BOTH) == 0;
-    return Result;
+    shutdown((SOCKET)Conn->Socket, SD_BOTH);
+    closesocket((SOCKET)Conn->Socket);
+    Conn->Socket = INVALID_SOCKET;
+    return true;
 }
 
 internal bool
