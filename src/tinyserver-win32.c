@@ -95,6 +95,21 @@ OpenNewSocket(ts_protocol Protocol)
     return Socket;
 }
 
+external bool
+SetSocketToBroadcast(file Socket)
+{
+    char Val = 1;
+    int Result = setsockopt((SOCKET)Socket, SOL_SOCKET, SO_BROADCAST, &Val, 1);
+    return Result != SOCKET_ERROR;
+}
+
+external bool
+BindClientToServer(file Client, file Listening)
+{
+    int Result = setsockopt((SOCKET)Client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&Listening, sizeof(Listening));
+    return Result != SOCKET_ERROR;
+}
+
 external ts_io_queue
 SetupIoQueue(u32 NumThreads)
 {
@@ -153,7 +168,7 @@ SetupListeningSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
             && listen(Socket, SOMAXCONN) == 0
             && (Event = WSACreateEvent()) != WSA_INVALID_EVENT
             && WSAEventSelect(Socket, Event, FD_ACCEPT) == 0
-            && AddFileToIoQueue(Socket, IoQueue))
+            && AddFileToIoQueue(Socket, &IoQueue))
         {
             Result.Socket = (usz)Socket;
             Result.Event = (usz)Event;
@@ -212,7 +227,7 @@ SetupConnectionSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
         }
         
         if (bind(Socket, (SOCKADDR*)ConnectionAddr, ConnectionAddrSize) == 0
-            && AddFileToIoQueue(Socket, IoQueue))
+            && AddFileToIoQueue(Socket, &IoQueue))
         {
             Result = (file)Socket;
         }
@@ -224,6 +239,10 @@ SetupConnectionSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
     
     return Result;
 }
+
+//==============================
+// Async events
+//==============================
 
 external ts_event
 ListenForEvents(usz* Sockets, usz* Events, usz NumEvents)
@@ -257,9 +276,9 @@ ListenForEvents(usz* Sockets, usz* Events, usz NumEvents)
 }
 
 external u32
-WaitOnIoQueue(ts_io_queue IoQueue, ts_io** Conn)
+WaitOnIoQueue(ts_io_queue* IoQueue, ts_io** Conn)
 {
-    HANDLE IoCP = *(HANDLE*)IoQueue.Data;
+    HANDLE IoCP = *(HANDLE*)IoQueue->Data;
     DWORD BytesTransferred;
     ULONG_PTR CompletionKey;
     OVERLAPPED* Overlapped;
@@ -270,9 +289,9 @@ WaitOnIoQueue(ts_io_queue IoQueue, ts_io** Conn)
 }
 
 external bool
-SendToIoQueue(ts_io_queue IoQueue, ts_io* Conn)
+SendToIoQueue(ts_io_queue* IoQueue, ts_io* Conn)
 {
-    HANDLE IoCP = *(HANDLE*)IoQueue.Data;
+    HANDLE IoCP = *(HANDLE*)IoQueue->Data;
     ULONG_PTR CompletionKey = 0;
     OVERLAPPED* Overlapped = (OVERLAPPED*)Conn->Async.Data;
     bool Result = PostQueuedCompletionStatus(IoCP, 0, CompletionKey, Overlapped);
@@ -280,9 +299,9 @@ SendToIoQueue(ts_io_queue IoQueue, ts_io* Conn)
 }
 
 external bool
-AddFileToIoQueue(file File, ts_io_queue IoQueue)
+AddFileToIoQueue(file File, ts_io_queue* IoQueue)
 {
-    HANDLE IoCP = *(HANDLE*)IoQueue.Data;
+    HANDLE IoCP = *(HANDLE*)IoQueue->Data;
     HANDLE Verify = CreateIoCompletionPort((HANDLE)File, IoCP, (ULONG_PTR)NULL, 0);
     return Verify == IoCP;
 }
@@ -319,7 +338,7 @@ _AcceptConnSimple(ts_listen Listening, ts_io* Conn, void* Buffer, u32 BufferSize
     if (Socket != INVALID_SOCKET)
     {
         Conn->Socket = (file)Socket;
-        if (!AddFileToIoQueue(Conn->Socket, IoQueue))
+        if (!AddFileToIoQueue(Conn->Socket, &IoQueue))
         {
             int Error = GetLastError();
             closesocket(Conn->Socket);
@@ -350,7 +369,7 @@ _AcceptConnEx(ts_listen Listening, ts_io* Conn, void* Buffer, u32 BufferSize, ts
     if (Conn->Socket == INVALID_SOCKET)
     {
         Conn->Socket = OpenNewSocket(Listening.Protocol);
-        if (!AddFileToIoQueue(Conn->Socket, IoQueue))
+        if (!AddFileToIoQueue(Conn->Socket, &IoQueue))
         {
             int Error = GetLastError();
             closesocket(Conn->Socket);

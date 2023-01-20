@@ -89,8 +89,7 @@ typedef struct ts_request
 typedef struct ts_request_body
 {
     u8* Base;
-    u64 Received;
-    u64 TotalSize;
+    u64 Size;
     
     char* ContentType;
     u16 ContentTypeSize;

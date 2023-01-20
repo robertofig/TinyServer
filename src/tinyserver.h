@@ -30,11 +30,13 @@ typedef enum ts_protocol
     Proto_Bluetooth = 4
 } ts_protocol;
 
-#if defined(TT_WINDOWS)
-#define IO_QUEUE_DATA_SIZE 8 // HANDLE to IoCP on Windows.
-#else
-// Other platforms.
-#endif
+typedef enum ts_sock_opt
+{
+    SockOpt_Broadcast,
+    SockOpt_DontLinger,
+    SockOpt_Linger,
+    SockOpt_UpdateContext
+} ts_sock_opt;
 
 #define MAX_SOCKADDR_SIZE 30 // Size of SOCKADDR_BTH.
 
@@ -57,6 +59,12 @@ typedef enum ts_event
     Event_Close,
     Event_Unknown
 } ts_event;
+
+#if defined(TT_WINDOWS)
+#define IO_QUEUE_DATA_SIZE 8 // HANDLE to IoCP on Windows.
+#else
+// Other platforms.
+#endif
 
 typedef struct ts_io_queue
 {
@@ -88,6 +96,10 @@ external file OpenNewSocket(ts_protocol Protocol);
 /* Creates a new socket for the defined [Protocol].
  |--- Return: file handle for the socket, or INVALID_FILE if failure. */
 
+external bool SetSocketTo(file Socket, ts_sock_opt Option);
+
+external bool BindClientToServer(file Client, file Listening);
+
 external ts_io_queue SetupIoQueue(u32 NumThreads);
 
 /* Prepares async IO queue for [NumThreads] number of threads.
@@ -118,19 +130,19 @@ external ts_event ListenForEvents(usz* Sockets, usz* Events, usz NumEvents);
 |  determines how many [Sockets] and [Events] there are.
 |--- Return: the first event signaled. */
 
-external u32 WaitOnIoQueue(ts_io_queue IoQueue, ts_io** Conn);
+external u32 WaitOnIoQueue(ts_io_queue* IoQueue, ts_io** Conn);
 
 /* Waits on an [IoQueue] until any IO completes. [Conn] pointer is filled
  |  with the socket info that was used to start the IO.
 |--- Return: number of bytes transferred on the operation, or 0 if failure. */
 
-external bool SendToIoQueue(ts_io_queue IoQueue, ts_io* Conn);
+external bool SendToIoQueue(ts_io_queue* IoQueue, ts_io* Conn);
 
 /* Sends the socket in [Conn] back to the [IoQueue]. No bytes are
  |  transferred during the operation.
 |--- Return: true if successful, false if not. */
 
-external bool AddFileToIoQueue(file File, ts_io_queue IoQueue);
+external bool AddFileToIoQueue(file File, ts_io_queue* IoQueue);
 
 /* Adds a [File] to the [IoQueue], so IO on it can be completed
  |  asynchorously. [File] can be a file or a socket. Once a file is added to

@@ -201,6 +201,8 @@ ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body)
     string Line = EatToken(InBuffer, &ReadCur, '\n');
     while (ReadCur != INVALID_IDX)
     {
+        Request->HeaderSize = ReadCur;
+        
         if (Line.Base[0] == '\r'
             || Line.Base[0] == '\n')
         {
@@ -216,12 +218,12 @@ ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body)
                     && (BodySize = StringToUInt(EntitySize)) != USZ_MAX)
                 {
                     Body->Base = (u8*)Request->Base + ReadCur;
-                    Body->Received = InBuffer.WriteCur - ReadCur;
-                    Body->TotalSize = BodySize;
+                    Body->Size = BodySize;
                     Body->ContentType = (char*)ContentType.Base;
                     Body->ContentTypeSize = ContentType.WriteCur;
                     
-                    if (Body->Received < Body->TotalSize)
+                    usz AmountReceived = InBuffer.WriteCur - Request->HeaderSize;
+                    if (AmountReceived < Body->Size)
                     {
                         return HttpParse_BodyIncomplete;
                     }
@@ -231,6 +233,7 @@ ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body)
                     return HttpParse_HeaderInvalid;
                 }
             }
+            
             return HttpParse_OK;
         }
         
@@ -259,7 +262,6 @@ ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body)
         *KeySizeInfo = (u8)Key.WriteCur;
         *ValueSizeInfo = (u16)Value.WriteCur;
         
-        Request->HeaderSize = ReadCur;
         Request->NumHeaders++;
         
         Line = EatToken(InBuffer, &ReadCur, '\n');
@@ -373,7 +375,7 @@ ParseFormData(ts_request_body RequestBody)
     // Final boundary ends in -- (e.g. if boundary is "--s20bHc", final boundary is"--s20bHc--").
     usz FinalBoundarySize = Boundary.Size + 2;
     
-    string Body = String(RequestBody.Base, RequestBody.Received, 0, EC_ASCII);
+    string Body = String(RequestBody.Base, RequestBody.Size, 0, EC_ASCII);
     usz ReadCur = 0;
     char* Offset = NULL;
     ts_form_field_parser Parser = {0};
