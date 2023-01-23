@@ -48,10 +48,9 @@ typedef enum ts_http_parse
 {
     HttpParse_OK,
     HttpParse_HeaderIncomplete,
-    HttpParse_BodyIncomplete,
-    HttpParse_HeaderInvalid,
-    HttpParse_HeaderMalicious,
-    HttpParse_TooManyHeaders
+    HttpParse_HeaderInvalid,   // Error.
+    HttpParse_HeaderMalicious, // Error.
+    HttpParse_TooManyHeaders   // Error.
 } ts_http_parse;
 
 #define HttpVerb_Unknown 0
@@ -86,27 +85,17 @@ typedef struct ts_request
     u16 FirstHeaderOffset;
 } ts_request;
 
-typedef struct ts_request_body
-{
-    u8* Base;
-    u64 Size;
-    
-    char* ContentType;
-    u16 ContentTypeSize;
-} ts_request_body;
-
-external ts_http_parse ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body);
+external ts_http_parse ParseHttpHeader(string InBuffer, ts_request* Request);
 
 /* Parses an incoming request pointed at by [InBuffer]. The parsing is done on
- |  the [Request] and [Body] objects, which must be zeroed on first call. The
- |  request may not be complete, in which case the function parses however much
- |  it can and indicates that there is more data to be read. For further calls
- |  to the function, either the old [Request] and [Body] objects can be passed,
-|  in which case the parsing resumes where it ended, or new (zeroed) objects,
-|  which will start the parsin again from the top. The result is the same.
+ |  the [Request] object, which must be zeroed on first call. The request may
+ |  not be complete, in which case the function parses however much it can and
+ |  indicates that there is more data to be read. For further calls to the
+ |  function, the old [Request] object can be passed, in which case the parsing
+ |  resumes where it ended, or a new (zeroed) object, which will start the
+ |  parsing again from the top. The result is the same.
 |--- Return: HttpParse_OK if completed successfully, HttpParse_HeaderIncomplete
-|    if there's still more data to read, HttpParse_BodyIncomplete if there's
-|    more body data to read, or one of the error codes if failure. */
+|    if there's still more data to read, or an error code if failure. */
 
 external string GetHeaderByKey(ts_request* Request, char* TargetKey);
 
@@ -125,14 +114,29 @@ external string GetHeaderByIdx(ts_request* Request, usz TargetIdx);
 // Request Body
 //================================
 
+typedef struct ts_body
+{
+    u8* Base;
+    u64 Size;
+    
+    char* ContentType;
+    u16 ContentTypeSize;
+} ts_request_body;
+
+external ts_body GetBodyInfo(ts_request* Request);
+
+/* Gets the info of the request body, if there is one. The [Request] object
+ |  must have been previously parsed to completion.
+|--- Return: struct with body info, or empty struct if request is bodyless. */
+
 typedef struct ts_form_field
 {
     char* FieldName;
     char* Filename;
     char* Charset;
     u16 FieldNameSize; //fieldnamelen
-    u16 FilenameSize; //filenamelen
-    u16 CharsetSize; //charsetlen
+    u16 FilenameSize;  //filenamelen
+    u16 CharsetSize;   //charsetlen
     
     void* Data;
     u32 DataLen; //datalen
@@ -145,7 +149,7 @@ typedef struct ts_multiform
     void* LastField;
 } ts_multiform;
 
-external ts_multiform ParseFormData(ts_request_body Body);
+external ts_multiform ParseFormData(ts_body Body);
 
 /* Parses request body of content-type "multipart/form-data". [Body] must be
 |  fully initialised, and the entire content of the body must have been read

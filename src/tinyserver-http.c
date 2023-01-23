@@ -112,7 +112,7 @@ IsRequestMalicious(string Path, string Query)
 }
 
 external ts_http_parse
-ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body)
+ParseHttpHeader(string InBuffer, ts_request* Request)
 {
     usz ReadCur = 0;
     
@@ -206,34 +206,6 @@ ParseHttpHeader(string InBuffer, ts_request* Request, ts_request_body* Body)
         if (Line.Base[0] == '\r'
             || Line.Base[0] == '\n')
         {
-            if (Request->Verb == HttpVerb_Post
-                || Request->Verb == HttpVerb_Put)
-            {
-                string EntitySize = GetHeaderByKey(Request, "Content-Length");
-                string ContentType = GetHeaderByKey(Request, "Content-Type");
-                
-                usz BodySize;
-                if (EntitySize.Base
-                    && ContentType.Base
-                    && (BodySize = StringToUInt(EntitySize)) != USZ_MAX)
-                {
-                    Body->Base = (u8*)Request->Base + ReadCur;
-                    Body->Size = BodySize;
-                    Body->ContentType = (char*)ContentType.Base;
-                    Body->ContentTypeSize = ContentType.WriteCur;
-                    
-                    usz AmountReceived = InBuffer.WriteCur - Request->HeaderSize;
-                    if (AmountReceived < Body->Size)
-                    {
-                        return HttpParse_BodyIncomplete;
-                    }
-                }
-                else
-                {
-                    return HttpParse_HeaderInvalid;
-                }
-            }
-            
             return HttpParse_OK;
         }
         
@@ -359,8 +331,34 @@ typedef enum ts_form_parsing_stage
     FormParse_Error
 } ts_form_parsing_stage;
 
+external ts_body
+GetBodyInfo(ts_request* Request)
+{
+    ts_body Result = {0};
+    
+    if (Request->Verb == HttpVerb_Post
+        || Request->Verb == HttpVerb_Put)
+    {
+        string EntitySize = GetHeaderByKey(Request, "Content-Length");
+        string ContentType = GetHeaderByKey(Request, "Content-Type");
+        
+        usz BodySize;
+        if (EntitySize.Base
+            && ContentType.Base
+            && (BodySize = StringToUInt(EntitySize)) != USZ_MAX)
+        {
+            Result.Base = (u8*)Request->Base + Request->HeaderSize;
+            Result.Size = BodySize;
+            Result.ContentType = ContentType.Base;
+            Result.ContentTypeSize = ContentType.WriteCur;
+        }
+    }
+    
+    return Result;
+}
+
 external ts_multiform
-ParseFormData(ts_request_body RequestBody)
+ParseFormData(ts_body RequestBody)
 {
     ts_multiform Form = {0}, EmptyForm = {0};
     
