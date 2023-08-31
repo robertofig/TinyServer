@@ -26,7 +26,7 @@ internal bool _SendPacketsEx(ts_io*, void**, u32*, usz);
 // Server configs
 //==============================
 
-external bool
+external b32
 InitServer(void)
 {
     InitBuffersArch();
@@ -35,7 +35,7 @@ InitServer(void)
     WSADATA WSAData;
     if (WSAStartup(0x202, &WSAData) != 0)
     {
-        return false;
+        return 0;
     }
     
     // It does not matter which protocol is called here, this socket is just for
@@ -43,7 +43,7 @@ InitServer(void)
     SOCKET IoctlSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (IoctlSocket == INVALID_SOCKET)
     {
-        return false;
+        return 0;
     }
     
     DWORD BytesReturned = 0;
@@ -74,7 +74,7 @@ InitServer(void)
     SendPackets = (_TransmitPackets && gSysInfo.OSVersion[0] == 'S') ? _SendPacketsEx : _SendPacketsSimple;
     
     closesocket(IoctlSocket);
-    return true;
+    return 1;
 }
 
 external file
@@ -91,10 +91,11 @@ OpenNewSocket(ts_protocol Protocol)
         default: { AF = 0; Type = 0; Proto = 0; }
     }
     
-    file Socket = (file)WSASocketA(AF, Type, Proto, NULL, 0, WSA_FLAG_OVERLAPPED);
-    return Socket;
+    file Result = (file)WSASocketA(AF, Type, Proto, NULL, 0, WSA_FLAG_OVERLAPPED);
+    return Result;
 }
 
+#if 0
 external bool
 SetSocketToBroadcast(file Socket)
 {
@@ -109,27 +110,29 @@ BindClientToServer(file Client, file Listening)
     int Result = setsockopt((SOCKET)Client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&Listening, sizeof(Listening));
     return Result != SOCKET_ERROR;
 }
+#endif
 
-external ts_io_queue
-SetupIoQueue(u32 NumThreads)
+external b32
+SetupIoQueue(ts_io_queue* IoQueue, _opt u32 NumThreads)
 {
-    ts_io_queue Result = {0};
     HANDLE IoCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, (ULONG_PTR)NULL, NumThreads);
     if (IoCP != NULL)
     {
-        Result.NumThreads = NumThreads;
-        CopyData(Result.Data, sizeof(Result.Data), &IoCP, sizeof(IoCP));
+        IoQueue->NumThreads = NumThreads;
+        CopyData(IoQueue->Data, sizeof(IoQueue->Data), &IoCP, sizeof(IoCP));
+        return 1;
     }
-    return Result;
+    return 0;
 }
 
 external ts_listen
-SetupListeningSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
+SetupListeningSocket(ts_protocol Protocol, u16 Port, ts_io_queue* IoQueue)
 {
     ts_listen Result = {0};
+    Result.Socket = INVALID_FILE;
     
-    SOCKET Socket = OpenNewSocket(Protocol);
-    if (Socket != INVALID_SOCKET)
+    file Socket = OpenNewSocket(Protocol);
+    if (Socket != INVALID_FILE)
     {
         u8 ListeningAddr[sizeof(SOCKADDR_BTH)] = {0};
         i32 ListeningAddrSize = 0;
@@ -164,76 +167,22 @@ SetupListeningSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
         
         HANDLE IoCP = INVALID_HANDLE_VALUE;
         WSAEVENT Event = 0;
-        if (bind(Socket, (SOCKADDR*)ListeningAddr, ListeningAddrSize) == 0
-            && listen(Socket, SOMAXCONN) == 0
-            && (Event = WSACreateEvent()) != WSA_INVALID_EVENT
-            && WSAEventSelect(Socket, Event, FD_ACCEPT) == 0
-            && AddFileToIoQueue(Socket, &IoQueue))
+        if (bind((SOCKET)Socket, (SOCKADDR*)ListeningAddr, ListeningAddrSize) == 0
+            && listen((SOCKET)Socket, SOMAXCONN) == 0
+            && (Event = WSACreateEvent()) != INVALID_HANDLE_VALUE
+            && WSAEventSelect((SOCKET)Socket, Event, FD_ACCEPT) == 0
+            && AddFileToIoQueue(Socket, IoQueue))
         {
-            Result.Socket = (usz)Socket;
-            Result.Event = (usz)Event;
+            Result.Socket = Socket;
+            Result.Event = (file)Event;
             Result.Protocol = Protocol;
             CopyData(Result.SockAddr, sizeof(Result.SockAddr), ListeningAddr, ListeningAddrSize);
             Result.SockAddrSize = (u32)ListeningAddrSize;
-            
         }
         else
         {
-            int Error = GetLastError();
-            closesocket(Socket);
-        }
-    }
-    
-    return Result;
-}
-
-external file
-SetupConnectionSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
-{
-    file Result = INVALID_SOCKET;
-    
-    SOCKET Socket = OpenNewSocket(Protocol);
-    if (Socket != INVALID_SOCKET)
-    {
-        u8 ConnectionAddr[sizeof(SOCKADDR_BTH)] = {0};
-        i32 ConnectionAddrSize = 0;
-        
-        switch (Protocol)
-        {
-            case Proto_TCPIP4:
-            case Proto_UDPIP4:
-            {
-                SOCKADDR_IN* Addr = (SOCKADDR_IN*)ConnectionAddr;
-                Addr->sin_family = (ADDRESS_FAMILY)AF_INET;
-                Addr->sin_port = FlipEndian16(Port);
-                Addr->sin_addr.s_addr = INADDR_ANY;
-                ConnectionAddrSize = sizeof(SOCKADDR_IN);
-            } break;
-            
-            case Proto_TCPIP6:
-            case Proto_UDPIP6:
-            {
-                SOCKADDR_IN6* Addr = (SOCKADDR_IN6*)ConnectionAddr;
-                Addr->sin6_family = AF_INET6;
-                Addr->sin6_port = FlipEndian16(Port);
-                Addr->sin6_addr = in6addr_any;
-                ConnectionAddrSize = sizeof(SOCKADDR_IN6);
-            } break;
-            
-            case Proto_Bluetooth:
-            {
-                // TODO: Fill Bluetooth struct.
-            } break;
-        }
-        
-        if (bind(Socket, (SOCKADDR*)ConnectionAddr, ConnectionAddrSize) == 0
-            && AddFileToIoQueue(Socket, &IoQueue))
-        {
-            Result = (file)Socket;
-        }
-        else
-        {
-            closesocket(Socket);
+            closesocket((SOCKET)Socket);
+            WSACloseHandle(Event);
         }
     }
     
@@ -244,34 +193,159 @@ SetupConnectionSocket(ts_protocol Protocol, u16 Port, ts_io_queue IoQueue)
 // Async events
 //==============================
 
-external ts_event
-ListenForEvents(usz* Sockets, usz* Events, usz NumEvents)
+external usz
+MaxNumberOfEvents(void)
 {
-    ts_event Result = Event_None;
+    return (usz)WSA_MAXIMUM_WAIT_EVENTS;
+}
+
+external b32
+InitEventList(ts_event_list* List, usz NumEvents)
+{
+    // Memory layout of list is: [NumEvent] counts of SOCKET pointers,
+    // followed by [NumEvents] counts of WSAEVENT objects. Separating them
+    // into two arrays, any index must tie a SOCKET pointer to its WSAEVENT.
+    // This is because WSAWaitOnMultipleEvents() requires a contiguous
+    // array of WSAEVENT objects.
     
-    DWORD Signaled = WSAWaitForMultipleEvents(NumEvents, (WSAEVENT*)Events, FALSE, WSA_INFINITE, FALSE);
-    if (Signaled != WSA_WAIT_FAILED)
+    usz MemSize = NumEvents * (sizeof(SOCKET*) + sizeof(WSAEVENT));
+    List->Events = GetMemory(MemSize, 0, MEM_READ|MEM_WRITE);
+    if (List->Events.Mem)
     {
-        u32 Idx = Signaled - WSA_WAIT_EVENT_0;
+        List->MaxEvents = NumEvents;
+        List->_IterCurrentEvent = USZ_MAX;
+        return 1;
+    }
+    return 0;
+}
+
+external void
+DestroyEventList(ts_event_list* List)
+{
+    file** SocketList = (file**)List->Events.Mem;
+    WSAEVENT* EventList = (WSAEVENT*)(SocketList + List->MaxEvents);
+    
+    for (usz Idx = 0; Idx < List->EventCount; Idx++)
+    {
+        WSACloseEvent(EventList[Idx]);
+    }
+    FreeMemory(&List->Events);
+}
+
+external b32
+AddEvent(ts_event_list* List, file* Socket, i32 Events)
+{
+    if (List->EventCount < List->MaxEvents)
+    {
+        WSAEVENT Event = WSACreateEvent();
+        long NetEvents = 0;
+        if (Events & Event_Accept) NetEvents |= FD_ACCEPT;
+        if (Events & Event_Connect) NetEvents |= FD_CONNECT;
+        if (Events & Event_Read) NetEvents |= FD_READ;
+        if (Events & Event_Write) NetEvents |= FD_WRITE;
+        if (Events & Event_Close) NetEvents |= FD_CLOSE;
         
-        SOCKET Socket = (SOCKET)Sockets[Idx];
-        WSAEVENT Event = (WSAEVENT)Events[Idx];
-        WSANETWORKEVENTS EventType;
-        if (WSAEnumNetworkEvents(Socket, Event, &EventType) == 0)
+        if (WSAEventSelect(*Socket, Event, NetEvents) == 0)
         {
-            switch (EventType.lNetworkEvents)
+            file** SocketList = (file**)List->Events.Mem;
+            WSAEVENT* EventList = (WSAEVENT*)(SocketList + List->MaxEvents);
+            SocketList[List->EventCount] = Socket;
+            EventList[List->EventCount++] = Event;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+external b32
+PopEvent(ts_event_list* List, ts_event Event)
+{
+    file** SocketList = (file**)List->Events.Mem;
+    WSAEVENT* EventList = (WSAEVENT*)(SocketList + List->MaxEvents);
+    
+    if (WSACloseEvent(EventList[Event.Idx]))
+    {
+        EventList[Event.Idx] = EventList[--List->EventCount];
+        SocketList[Event.Idx] = SocketList[List->EventCount];
+        return 1;
+    }
+    return 0;
+}
+
+external ts_event
+ListenForEvents(ts_event_list* List)
+{
+    ts_event Result = {0};
+    
+    file** SocketList = (file**)List->Events.Mem;
+    WSAEVENT* EventList = (WSAEVENT*)(SocketList + List->MaxEvents);
+    
+    // The loop below is not meant to run forever. Event processing happens in two steps:
+    // 1) call polling function, 2) test each socket to see if signaled. ListenForEvents()
+    // bundles them both in one call. First time called it will execute step #1 and #2,
+    // with #2 looping over sockets and returns on first found signaled. Subsequent calls
+    // will only execute #2, continuing where the previous call stopped. After all sockets
+    // are checked we have to execute #1 again, hence the outer loop.
+    
+    while (1)
+    {
+        if (List->_IterCurrentEvent == USZ_MAX)
+        {
+            DWORD Signaled = WSAWaitForMultipleEvents(List->EventCount, EventList, FALSE, WSA_INFINITE, FALSE);
+            if (Signaled == WSA_WAIT_FAILED)
             {
-                case FD_ACCEPT: Result = Event_Accept; break;
-                case FD_CONNECT: Result = Event_Connect; break;
-                case FD_READ: Result = Event_Read; break;
-                case FD_WRITE: Result = Event_Write; break;
-                case FD_CLOSE: Result = Event_Close; break;
-                default: Result = Event_Unknown;
+                // This is the only codepath that exits ListenForEvents() on error.
+                break;
+            }
+            List->_IterCurrentEvent = Signaled - WSA_WAIT_EVENT_0;
+        }
+        
+        while (List->_IterCurrentEvent < List->EventCount)
+        {
+            file* Socket = SocketList[List->_IterCurrentEvent];
+            WSAEVENT Event = EventList[List->_IterCurrentEvent++];
+            
+            WSANETWORKEVENTS EventType;
+            if (WSAEnumNetworkEvents(*(SOCKET*)Socket, (WSAEVENT)Event, &EventType) == 0)
+            {
+                if (EventType.lNetworkEvents == FD_ACCEPT
+                    && EventType.iErrorCode[FD_ACCEPT_BIT] == 0)
+                {
+                    Result.Type = Event_Accept;
+                }
+                else if (EventType.lNetworkEvents == FD_READ
+                         && EventType.iErrorCode[FD_READ_BIT] == 0)
+                {
+                    Result.Type = Event_Read;
+                }
+                else if (EventType.lNetworkEvents == FD_WRITE
+                         && EventType.iErrorCode[FD_WRITE_BIT] == 0)
+                {
+                    Result.Type = Event_Write;
+                }
+                else if (EventType.lNetworkEvents == FD_CLOSE
+                         && EventType.iErrorCode[FD_CLOSE_BIT] == 0)
+                {
+                    Result.Type = Event_Close;
+                }
+                else
+                {
+                    Result.Type = Event_Unknown;
+                }
+                
+                Result.Socket = Socket;
+                Result.Idx = List->_IterCurrentEvent-1;
+                WSAResetEvent(Event);
+                
+                return Result;
             }
         }
-        WSAResetEvent(Event);
+        
+        // No sockets left to check, do this to force another call to polling.
+        List->_IterCurrentEvent = USZ_MAX;
     }
     
+    // It will only get here if an error in WSAWaitForMultipleEvents() happened.
     return Result;
 }
 
