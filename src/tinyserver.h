@@ -17,12 +17,12 @@
 #include "tinybase-platform.h"
 #include "tinybase-queues.h"
 
-#include "tinyserver-internal.h"
-
 
 //==============================
 // Structs and defines
 //==============================
+
+#define MAX_SOCKADDR_SIZE 28
 
 typedef enum ts_protocol
 {
@@ -32,43 +32,40 @@ typedef enum ts_protocol
     Proto_UDPIP6    = 3
 } ts_protocol;
 
-typedef enum ts_sock_opt
+typedef enum ts_status
 {
-    SockOpt_Broadcast,
-    SockOpt_DontLinger,
-    SockOpt_Linger,
-    SockOpt_UpdateContext
-} ts_sock_opt;
+    Status_None,
+    Status_Disconnected,
+    Status_Connected,
+    Status_Aborted,
+    Status_Error
+} ts_status;
 
-#define TS_MAX_SOCKADDR_SIZE 28 // Covers all possible sockaddr lengths.
+typedef struct ts_sockaddr
+{
+    u8 Addr[MAX_SOCKADDR_SIZE]; // Enough for the largest sockaddr struct.
+    u32 Size;
+} ts_sockaddr;
 
 typedef struct ts_listen
 {
     file Socket;
     file Event;
     ts_protocol Protocol;
-    u8 SockAddr[TS_MAX_SOCKADDR_SIZE];
     i32 SockAddrSize;
 } ts_listen;
-
-typedef struct ts_accept
-{
-    file Socket;
-    ts_protocol Protocol;
-} ts_accept;
 
 #if defined(TT_WINDOWS)
 # define TS_INTERNAL_DATA_SIZE sizeof(OVERLAPPED)
 #elif defined(TT_LINUX)
-# define TS_INTERNAL_DATA_SIZE 4 // ts_work_type (see tinyserver-epoll.c for more info).
+# define TS_INTERNAL_DATA_SIZE 8 // see tinyserver-epoll.c for more info.
 #endif
 
 typedef struct ts_io
 {
-    struct ts_io* volatile Next;
-    
     file Socket;
     usz BytesTransferred;
+    ts_status Status;
     
     u8* IoBuffer;
     u32 IoBufferSize;
@@ -82,49 +79,71 @@ typedef struct ts_io
 
 external bool InitServer(void);
 
-/* Must be called only once, before anything else. What it does depends on the platform.
+/* Must be called only once, before anything else. Sets up platform-dependent parts,
+|  as well as initializing working buffers.
 |--- Return: true if successful, false if not. */
+
+external void CloseServer(void);
+
+/* Performs server cleanup and freeing of resources.
+--- Returns: nothing. */
 
 external file OpenNewSocket(ts_protocol Protocol);
 
 /* Creates a new socket for the defined [Protocol].
  |--- Return: valid socket if successful, INVALID_FILE if not. */
 
-external bool AddListeningSocket(ts_protocol Protocol, u16 Port);
+external bool CloseSocket(ts_io* Conn);
 
-/* Creates a new socket for the defined [Protocol], binds it to the specified [Port] number
-|  and sets it up for listening. The socket is added to an internal structure that keeps
-|  track of listening sockets. Must have setup [IoQueue] prior to calling this.
+/* Closes the socket, taking down any pending connection as well (forced shutdown).
 |--- Return: true if successful, false if not. */
 
-external void CloseServer(void);
+external bool BindFileToIoQueue(file File, _opt void* RelatedData);
 
-// TODO: Documentation.
+/* Binds a [File] (socket or regular file) to the IO queue, so IO operations on it
+ |  can be dequeued later by called WaitOnIoQueue(). [RelatedData] is an optional
+|  parameter where a pointer can be passed to be dequeued with the handle.
+|--- Return: true if successful, false if not. */
+
+external ts_sockaddr CreateSockAddr(char* IpAddress, u16 Port, ts_protocol Protocol);
+
+/* Creates and populates a sockaddr struct for the desired [Protocol], with a
+ |  specified [IpAddress] and [Port]. Meant to be passed as-is to CreateConn().
+|--- Return: filled ts_sockaddr struct. */
+
+external bool AddListeningSocket(ts_protocol Protocol, u16 Port);
+
+/* Creates a new socket for the defined [Protocol], binds it to the specified [Port]
+ |  number and sets it up for listening. The socket is added to an internal structure
+ |  that keeps track of listening sockets.
+|--- Return: true if successful, false if not. */
 
 
 //==============================
 // Async events
 //==============================
 
-ts_accept (*ListenForConnections)(void);
+ts_listen ListenForConnections(void);
 
-/* Polls the added listening sockets to check for connections. Waits indefinitely until any
-|  of the sockets gets signaled. If more than one socket gets signaled at the same time,
-|  returns the first one, and the next ones upon subsequent calls to this function.
-|--- Return: ts_accept info of the pending connection. */
+/* Polls the added listening sockets to check for connections. Waits indefinitely
+ |  until any of the sockets gets signaled. If more than one socket gets signaled at
+ |  the same time, returns the first one, and the next ones upon subsequent calls to
+ |  this function.
+|--- Return: info of the pending connection, or empty object in case of failure. */
 
-ts_io* (*WaitOnIoQueue)(void);
+ts_io* WaitOnIoQueue(void);
 
-/* Waits on the IO queue for event completion, indefinitely until any event get dequeued.
-|  If more than one event completes at the same time, returns the first one, and the next
-|  ones upon subsequent calls to this function.
-|--- Return: pointer to the ts_io connection returned, with the field [.BytesTransferred]
-|            updated to that of the latest transaction, or NULL in case of failure. */
+/* Waits indefinitely on the IO queue until an event completes. If more than one
+ |  event gets dequeued at the same time, returns the first one, and the next ones
+ |  upon subsequent calls to this function.
+|--- Return: pointer to the ts_io connection returned, with the field [.Status]
+|            indicating if the connection is still standing or has been aborted, and
+ |            [.BytesTransferred] updated to that of the latest transaction. */
 
-bool (*SendToIoQueue)(ts_io* Conn);
+bool SendToIoQueue(ts_io* Conn);
 
-/* Sends the socket in [Conn] back to the [IoQueue]. No bytes are transferred during the
-|  operation.
+/* Sends the socket in [Conn] back to the [IoQueue]. No bytes are transferred
+ |  during the operation.
 |--- Return: true if successful, false if not. */
 
 
@@ -134,43 +153,38 @@ bool (*SendToIoQueue)(ts_io* Conn);
 
 bool (*AcceptConn)(ts_listen Listening, ts_io* Conn, void* Buffer, u32 BufferSize);
 
-/* Accepts an incoming connection on [Listening], assigns it to the socket in [Conn], and
-|  binds that socket to the IO queue. If a socket has not been created yet, the function
- |  creates a new one and assigns it to [Conn]. [Buffer] and [BufferSize] are used for
- |  receiving the first incoming packet of the connection.
+/* Accepts an incoming connection on [Listening], assigns it to the socket in [Conn],
+ |  and binds that socket to the IO queue. If a socket has not been created yet, the
+ |  function creates a new one and assigns it to [Conn]. [Buffer] and [BufferSize] are
+ |  used for receiving the first incoming packet of the connection.
 |--- Return: true if successful, false if not. */
 
-bool (*CreateConn)(ts_io* Conn, void* DstSockAddr, u32 DstSockAddrSize, void* Buffer,
-                   u32 BufferSize);
+bool (*CreateConn)(ts_io* Conn, ts_sockaddr SockAddr, void* Buffer, u32 BufferSize);
 
 /* Creates a new connection on the socket in [Conn], binding it to the address at
-|  [DstSockAddr]. This must be a sockaddr structure, of size [DstSockAddrSize]. [Buffer] and
-|  [BufferSize] are used for sending the first packet of data right after connection.
-|--- Return: true if successful, false if not. */
-
-bool (*TerminateConn)(ts_io* Conn);
-
-/* Gracefully disconnects the socket in [Conn] and closes it.
+|  [SockAddr]. This must have been created with CreateSockAddr(). [Buffer] and
+ |  [BufferSize] are used for sending the first packet of data right after connection.
 |--- Return: true if successful, false if not. */
 
 bool (*DisconnectSocket)(ts_io* Conn);
 
-/* Gracefully disconnects the socket in [Conn]. May leave the socket open for new connections,
-|  depending on the implementation. Check socket handle upon return to see if it's still valid.
+/* Gracefully disconnects the socket in [Conn]. May leave the socket open for new
+ |  connections, depending on the implementation. Check socket handle upon return to
+ |  see if it's still valid.
 |--- Return: true if successful, false if not. */
 
 bool (*SendPackets)(ts_io* Conn, void* Buffer, u32 BufferSize);
 
 /* Sends a [Buffer] of [BufferSize] to the socket in [Conn]. The operation happens
-|  asynchronously, and its completion status, as well as number of bytes transmitted, is
-|  gotten by calling WaitOnIoQueue().
+|  asynchronously, and its completion status, as well as number of bytes transmitted,
+ |  is gotten by calling WaitOnIoQueue().
  |--- Return: true if successful, false if not. */
 
 bool (*RecvPackets)(ts_io* Conn, void* Buffer, u32 BufferSize);
 
-/* Receives a list of packets into [Buffer] of [BufferSize] from the socket in [Conn]. The
- |  operation happens asynchronously, and its completion status, as well as number of bytes
- |  transmitted, is gotten by calling WaitOnIoQueue().
+/* Receives a list of packets into [Buffer] of [BufferSize] from the socket in [Conn].
+ |  The operation happens asynchronously, and its completion status, as well as number
+ |  of bytes transmitted, is gotten by calling WaitOnIoQueue().
  |--- Return: true if successful, false if not. */
 
 
