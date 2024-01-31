@@ -201,7 +201,8 @@ OpenNewSocket(ts_protocol Protocol)
         { AF = 0; Type = 0; Proto = 0; }
     }
     
-    file Result = (file)socket(AF, Type, Proto);
+    int NewSocket = socket(AF, Type, Proto);
+    file Result = (NewSocket == -1) ? INVALID_FILE : (file)NewSocket;
     return Result;
 }
 
@@ -337,8 +338,9 @@ ListenForConnections(void)
         if (EventCount < 0)
         {
             // This is the only codepath that exits ListenForEvents() on error.
-            ts_listen EmptyError = {0};
-            return EmptyError;
+            ts_listen ErrorResult = {0};
+            ErrorResult.Socket = INVALID_FILE;
+            return ErrorResult;
         }
         ServerInfo->CurrentAcceptIdx = 0;
         ServerInfo->MaxAcceptIdx = EventCount;

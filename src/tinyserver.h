@@ -129,7 +129,8 @@ ts_listen ListenForConnections(void);
  |  until any of the sockets gets signaled. If more than one socket gets signaled at
  |  the same time, returns the first one, and the next ones upon subsequent calls to
  |  this function.
-|--- Return: info of the pending connection, or empty object in case of failure. */
+|--- Return: ts_listen struct, to be passed to AcceptConn(). If this function fails,
+|            the [.Socket] member will be of value INVALID_FILE. */
 
 ts_io* WaitOnIoQueue(void);
 

@@ -37,8 +37,6 @@
 #define MAX_NUM_HEADERS 255
 #define IMF_DATE_LENGTH 30
 
-global char* gServerName = ""; // Left blank to be set by server app.
-
 
 //================================
 // Request Header
@@ -201,6 +199,7 @@ typedef struct ts_cookie
 
 typedef struct ts_response
 {
+    char* ServerName; // Must be null-terminated.
     u16 HeaderSize;
     
     u16 StatusCode;

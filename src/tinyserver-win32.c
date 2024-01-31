@@ -141,7 +141,8 @@ OpenNewSocket(ts_protocol Protocol)
         default: { AF = 0; Type = 0; Proto = 0; }
     }
     
-    file Result = (file)WSASocketA(AF, Type, Proto, NULL, 0, WSA_FLAG_OVERLAPPED);
+    SOCKET NewSocket = WSASocketA(AF, Type, Proto, NULL, 0, WSA_FLAG_OVERLAPPED);
+    file Result = (NewSocket == INVALID_SOCKET) ? INVALID_FILE : (file)NewSocket;
     return Result;
 }
 
@@ -292,8 +293,9 @@ ListenForConnections(void)
         if (Signaled == WSA_WAIT_FAILED)
         {
             // This is the only codepath that exits ListenForConnections() on error.
-            ts_listen EmptyError = {0};
-            return EmptyError;
+            ts_listen ErrorResult = {0};
+            ErrorResult.Socket = INVALID_FILE;
+            return ErrorResult;
         }
         ServerInfo->CurrentAcceptIdx = Signaled - WSA_WAIT_EVENT_0;
     }
