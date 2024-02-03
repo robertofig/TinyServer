@@ -41,6 +41,18 @@ typedef enum ts_status
     Status_Error
 } ts_status;
 
+typedef enum ts_op
+{
+    Op_None,
+    Op_AcceptConn,
+    Op_CreateConn,
+    Op_DisconnectSocket,
+    Op_RecvPacket,
+    Op_SendPacket,
+    Op_SendFile,
+    Op_SendToIoQueue
+} ts_op;
+
 typedef struct ts_sockaddr
 {
     u8 Addr[MAX_SOCKADDR_SIZE]; // Enough for the largest sockaddr struct.
@@ -56,9 +68,9 @@ typedef struct ts_listen
 } ts_listen;
 
 #if defined(TT_WINDOWS)
-# define TS_INTERNAL_DATA_SIZE sizeof(OVERLAPPED)
+# define TS_INTERNAL_DATA_SIZE 40 // See tinyserver-win32.c for more info.
 #elif defined(TT_LINUX)
-# define TS_INTERNAL_DATA_SIZE 8 // see tinyserver-epoll.c for more info.
+# define TS_INTERNAL_DATA_SIZE 8  // See tinyserver-epoll.c for more info.
 #endif
 
 typedef struct ts_io
@@ -66,6 +78,7 @@ typedef struct ts_io
     file Socket;
     usz BytesTransferred;
     ts_status Status;
+    ts_op Operation;
     
     u8* IoBuffer;
     u32 IoBufferSize;
@@ -174,14 +187,18 @@ bool (*DisconnectSocket)(ts_io* Conn);
  |  see if it's still valid.
 |--- Return: true if successful, false if not. */
 
-bool (*SendPackets)(ts_io* Conn, void* Buffer, u32 BufferSize);
+bool (*SendPacket)(ts_io* Conn, void* Buffer, u32 BufferSize);
 
 /* Sends a [Buffer] of [BufferSize] to the socket in [Conn]. The operation happens
 |  asynchronously, and its completion status, as well as number of bytes transmitted,
  |  is gotten by calling WaitOnIoQueue().
  |--- Return: true if successful, false if not. */
 
-bool (*RecvPackets)(ts_io* Conn, void* Buffer, u32 BufferSize);
+bool (*SendFile)(ts_io* Conn, file File);
+
+// TODO: escrever doc & funcoes!!!
+
+bool (*RecvPacket)(ts_io* Conn, void* Buffer, u32 BufferSize);
 
 /* Receives a list of packets into [Buffer] of [BufferSize] from the socket in [Conn].
  |  The operation happens asynchronously, and its completion status, as well as number
