@@ -7,10 +7,31 @@
 // programmers can add server capabilities quickly to existing applications,
 // or building new ones without being hoggled by the server part.
 //
-// The blueprint for building with it is to call InitServer(), then use the
-// functions on the "Setup" section to prepare listening sockets and create
-// IO threads. The IO is performed with the "Socket IO" group of functions,
-// and IO events are captured with the "Async events" section.
+// The blueprint for building with it is:
+//   1) Call InitServer().
+//   2) Call AddListeningSocket() for each protocol and port to listen on.
+//   3) Create at least one IO thread with an io loop.
+//   4) Start a listening loop (can be on the main process thread, or a
+//      thread specifically for it).
+//
+// The listening loop:
+//   1) Call ListenForConnections().
+//   2) Create a new ts_io object upon connection established.
+//   3) Call AcceptConn() with the returned ts_listen object and the created
+//      ts_io object. The result will be posted to the IO thread.
+//   4) Repeat from step #1.
+//
+// The io loop:
+//   1) Call WaitOnIoQueue().
+//   2) Check the received ts_io object for connection status [.Status].
+//      If the status is Status_Aborted, call DisconnectSocket; if it is
+//      Status_Error, call TerminateConn. The ts_io object can be reused
+//      for further AcceptConn calls.
+//   3) If Status_Connected, perform RecvPacket, SendPacket, or SendFile.
+//      Each operation will be posted again to WaitOnIoQueue, and may or may
+//      not complete upon dequeue. Check [.BytesReceived] how much IO was
+//      performed; adjust [.IoBuffer] and [.IoSize] to post again if needed.
+//   4) Repeat from #1.
 //===========================================================================
 #define TINYSERVER_H
 
