@@ -12,11 +12,13 @@
 // Forward declarations
 //==============================
 
-internal bool _AcceptConn(ts_listen, ts_io*, void*, u32);
-internal bool _CreateConn(ts_io*, ts_sockaddr, void*, u32);
+internal bool _AcceptConn(ts_listen, ts_io*);
+internal bool _CreateConn(ts_io*, ts_sockaddr);
 internal bool _DisconnectSocket(ts_io*);
-internal bool _RecvPacket(ts_io*, void*, u32);
-internal bool _SendPacket(ts_io*, void*, u32);
+internal bool _TerminateConn(ts_io*);
+internal bool _RecvPacket(ts_io*);
+internal bool _SendPacket(ts_io*);
+internal bool _SendFile(ts_io*);
 
 
 //==============================
@@ -27,7 +29,6 @@ internal bool _SendPacket(ts_io*, void*, u32);
 typedef struct ts_internal
 {
     int EventType; // Bitmask with the events returned by epoll.
-    file File; // Used on SendFile().
 } ts_internal;
 
 internal file
@@ -50,15 +51,54 @@ CreateIoQueue(void)
 }
 
 internal bool
-BindFileToQueue(file File, file Queue, _opt void* RelatedData)
+BindFileToIoQueue(file File, file IoQueue, _opt void* RelatedData)
 {
-    int EPoll = (int)Queue;
+    int EPoll = (int)IoQueue;
     struct epoll_event Event = {0};
     Event.events = EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET;
     Event.data.ptr = RelatedData;
     int Result = epoll_ctl(EPoll, EPOLL_CTL_ADD, File, &Event);
     return (Result == 0);
 }
+
+internal file
+OpenNewSocket(ts_protocol Protocol)
+{
+    int AF, Type = SOCK_CLOEXEC|SOCK_NONBLOCK, Proto;
+    switch (Protocol)
+    {
+        case Proto_TCPIP4:
+        { AF = AF_INET; Type |= SOCK_STREAM; Proto = IPPROTO_TCP; } break;
+        case Proto_TCPIP6:
+        { AF = AF_INET6; Type |= SOCK_STREAM; Proto = IPPROTO_TCP; } break;
+        case Proto_UDPIP4:
+        { AF = AF_INET; Type |= SOCK_DGRAM; Proto = IPPROTO_UDP; } break;
+        case Proto_UDPIP6:
+        { AF = AF_INET6; Type |= SOCK_DGRAM; Proto = IPPROTO_UDP; } break;
+        default:
+        { AF = 0; Type = 0; Proto = 0; }
+    }
+    
+    int NewSocket = socket(AF, Type, Proto);
+    file Result = (NewSocket == -1) ? INVALID_FILE : (file)NewSocket;
+    return Result;
+}
+
+internal bool
+CloseSocket(ts_io* Conn)
+{
+    if (close(Conn->Socket) == 0)
+    {
+        Conn->Socket = INVALID_FILE;
+        return true;
+    }
+    return false;
+}
+
+
+//==============================
+// Internal (Work queue)
+//==============================
 
 internal bool
 PushToWorkQueue(ts_io* Conn)
@@ -100,7 +140,7 @@ THREAD_PROC(IoEventProc)
             struct epoll_event Event = IoEvents[Idx];
             ts_io* Conn = (ts_io*)Event.data.ptr;
             ts_internal* Internal = (ts_internal*)Conn->InternalData;
-            IoEvent->EventType = Event.events;
+            Internal->EventType = Event.events;
         }
     }
     
@@ -124,6 +164,7 @@ InitServer(void)
     AcceptConn = _AcceptConn;
     CreateConn = _CreateConn;
     DisconnectSocket = _DisconnectSocket;
+    TerminateConn = _TerminateConn;
     RecvPacket = _RecvPacket;
     SendPacket = _SendPacket;
     
@@ -175,47 +216,6 @@ CloseServer(void)
         CloseFileHandle(ServerInfo->IoQueue);
         FreeMemory(&gServerArena);
     }
-}
-
-external file
-OpenNewSocket(ts_protocol Protocol)
-{
-    int AF, Type = SOCK_CLOEXEC|SOCK_NONBLOCK, Proto;
-    switch (Protocol)
-    {
-        case Proto_TCPIP4:
-        { AF = AF_INET; Type |= SOCK_STREAM; Proto = IPPROTO_TCP; } break;
-        case Proto_TCPIP6:
-        { AF = AF_INET6; Type |= SOCK_STREAM; Proto = IPPROTO_TCP; } break;
-        case Proto_UDPIP4:
-        { AF = AF_INET; Type |= SOCK_DGRAM; Proto = IPPROTO_UDP; } break;
-        case Proto_UDPIP6:
-        { AF = AF_INET6; Type |= SOCK_DGRAM; Proto = IPPROTO_UDP; } break;
-        default:
-        { AF = 0; Type = 0; Proto = 0; }
-    }
-    
-    int NewSocket = socket(AF, Type, Proto);
-    file Result = (NewSocket == -1) ? INVALID_FILE : (file)NewSocket;
-    return Result;
-}
-
-external bool
-CloseSocket(ts_io* Conn)
-{
-    if (close(Conn->Socket) == 0)
-    {
-        Conn->Status = Status_None;
-        return true;
-    }
-    return false;
-}
-
-external bool
-BindFileToIoQueue(file File, _opt void* RelatedData)
-{
-    ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
-    return BindFileToQueue(File, ServerInfo->IoQueue, RelatedData);
 }
 
 external ts_sockaddr
@@ -287,7 +287,7 @@ AddListeningSocket(ts_protocol Protocol, u16 Port)
             Listen->Protocol = Protocol;
             Listen->SockAddrSize = (u32)ListenAddrSize;
             
-            if (BindFileToQueue(Socket, ServerInfo->AcceptQueue, Listen))
+            if (BindFileToIoQueue(Socket, ServerInfo->AcceptQueue, Listen))
             {
                 ServerInfo->ListenCount++;
                 ServerInfo->AcceptEvents += sizeof(ts_listen);
@@ -364,58 +364,85 @@ WaitOnIoQueue(void)
     ts_io* Conn = PopFromWorkQueue();
     ts_internal Internal = *(ts_internal*)Conn->InternalData;
     
-    if (IoEvent.EventType & EPOLLERR)
+    if (Internal.EventType & EPOLLERR)
     {
         Conn->BytesTransferred = 0;
         Conn->Status = Status_Error;
     }
     
-    else if (IoEvent.EventType & EPOLLRDHUP
-             || IoEvent.EventType & EPOLLHUP)
+    else if (Internal.EventType & EPOLLRDHUP
+             || Internal.EventType & EPOLLHUP)
     {
         Conn->BytesTransferred = 0;
         Conn->Status = Status_Aborted;
     }
     
-    else if (IoEvent.EventType & EPOLLIN
-             && (Conn->Operation == Op_RecvPacket
-                 || Conn->Operation == Op_AcceptConn))
+    else if (Internal.EventType & EPOLLIN)
     {
-        ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
-                                        Conn->IoBufferSize, MSG_DONTWAIT);
-        if (BytesTransferred == -1)
+        switch (Conn->Operation)
         {
-            BytesTransferred = 0;
-            Conn->Status = Status_Error;
+            case Op_AcceptConn:
+            {
+                if (Conn->IoBuffer == NULL)
+                {
+                    continue; // Ignores the bundled recv.
+                }
+            }
+            
+            case Op_RecvPacket:
+            {
+                ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
+                                                Conn->IoSize, MSG_DONTWAIT);
+                if (BytesTransferred == -1)
+                {
+                    BytesTransferred = 0;
+                    Conn->Status = Status_Error;
+                }
+                else if (BytesTransferred == 0)
+                {
+                    Conn->Status = Status_Aborted;
+                }
+                Conn->BytesTransferred = (usz)BytesTransferred;
+            } break;
         }
-        Conn->BytesTransferred = (usz)BytesTransferred;
     }
     
-    else if (IoEvent.EventType & EPOLLOUT
-             && (Conn->Operation == Op_SendPacket
-                 || Conn->Operation == Op_CreateConn))
+    else if (Internal.EventType & EPOLLOUT)
     {
-        ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
-                                        Conn->IoBufferSize, MSG_DONTWAIT);
-        if (BytesTransferred == -1)
+        switch (Conn->Operation)
         {
-            BytesTransferred = 0;
-            Conn->Status = Status_Error;
+            case Op_CreateConn:
+            {
+                if (Con->IoBuffer == NULL)
+                {
+                    continue; // Ignores the bundled send.
+                }
+            }
+            
+            case Op_SendPacket:
+            {
+                ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
+                                                Conn->IoSize, MSG_DONTWAIT);
+                if (BytesTransferred == -1)
+                {
+                    BytesTransferred = 0;
+                    Conn->Status = Status_Error;
+                }
+                Conn->BytesTransferred = (usz)BytesTransferred;
+            } break;
+            
+            case Op_SendFile:
+            {
+                ssize_t BytesTransferred = sendfile(Conn->Socket, Conn->IoFile, NULL,
+                                                    Conn->IoSize);
+                if (BytesTransferred == -1)
+                {
+                    BytesTransferred = 0;
+                    Conn->Status = Status_Error;
+                }
+                Conn->BytesTransferred = (usz)BytesTransferred;
+            } break;
         }
-        Conn->BytesTransferred = (usz)BytesTransferred;
-    }
-    
-    else if (IoEvent.EventType & EPOLLOUT
-             && Conn->Operation == Op_SendFile)
-    {
-        ssize_t BytesTransferred = sendfile(Conn->Socket, Internal->File, NULL,
-                                            Conn->IoBufferSize);
-        if (BytesTransferred == -1)
-        {
-            BytesTransferred = 0;
-            Conn->Status = Status_Error;
-        }
-        Conn->BytesTransferred = (usz)BytesTransferred;
     }
     
     return Conn;
@@ -434,45 +461,45 @@ SendToIoQueue(ts_io* Conn)
 //==============================
 
 internal bool
-_AcceptConn(ts_listen Listening, ts_io* Conn, void* Buffer, u32 BufferSize)
+_AcceptConn(ts_listen Listening, ts_io* Conn)
 {
+    Conn->Operation = Op_AcceptConn;
+    ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
+    
     u8 RemoteSockAddr[MAX_SOCKADDR_SIZE] = {0};
     i32 RemoteSockAddrSize;
-    
-    Conn->Operation = Op_AcceptConn;
     int Socket = accept4(Listening.Socket, (struct sockaddr*)RemoteSockAddr,
                          (socklen_t*)&RemoteSockAddrSize, O_NONBLOCK);
     if (Socket >= 0
-        && BindFileToIoQueue(Socket, Conn))
+        && BindFileToIoQueue(Socket, ServerInfo->IoQueue, Conn))
     {
         Conn->Socket = (file)Socket;
         Conn->Status = Status_Connected;
         
-        u32 TotalAddrSize = RemoteSockAddrSize + 0x10;
-        u8* AddrBuffer = (u8*)Buffer + BufferSize - TotalAddrSize;
-        CopyData(AddrBuffer, RemoteSockAddrSize, RemoteSockAddr, RemoteSockAddrSize);
-        u32 ReadBufferSize = BufferSize - TotalAddrSize;
-        
-        Conn->IoBuffer = Buffer;
-        Conn->IoBufferSize = ReadBufferSize;
+        if (Conn->IoBuffer)
+        {
+            u32 TotalAddrSize = RemoteSockAddrSize + 0x10;
+            u8* AddrBuffer = (u8*)Conn->IoBuffer + Conn->IoSize - TotalAddrSize;
+            CopyData(AddrBuffer, RemoteSockAddrSize, RemoteSockAddr, RemoteSockAddrSize);
+            Conn->IoSize -= TotalAddrSize;
+        }
         return PushToWorkQueue(Conn);
     }
     
     close(Socket);
-    Conn->Socket = USZ_MAX;
+    Conn->Socket = INVALID_FILE;
+    Conn->Status = Status_Error;
     return false;
 }
 
 internal bool
-_CreateConn(ts_io* Conn, ts_sockaddr SockAddr, void* Buffer, u32 BufferSize)
+_CreateConn(ts_io* Conn, ts_sockaddr SockAddr)
 {
     Conn->Operation = Op_CreateConn;
     if (connect(Conn->Socket, (const struct sockaddr*)SockAddr.Addr,
                 (socklen_t)SockAddr.Size) == 0)
     {
         Conn->Status = Status_Connected;
-        Conn->IoBuffer = Buffer;
-        Conn->IoBufferSize = BufferSize;
         return PushToWorkQueue(Conn);
     }
     return false;
@@ -492,42 +519,30 @@ _DisconnectSocket(ts_io* Conn)
 }
 
 internal bool
-_RecvPacket(ts_io* Conn, void* Buffer, u32 BufferSize)
+_TerminateConn(ts_io* Conn)
 {
-    Conn->Operation = Op_RecvPacket;
-    Conn->IoBuffer = Buffer;
-    Conn->IoBufferSize = BufferSize;
-    return PushToWorkQueue(Conn);
+    Conn->Operation = Op_TerminateConn;
+    Conn->Status = Status_None;
+    return CloseSocket(Conn);
 }
 
 internal bool
-_SendPacket(ts_io* Conn, void* Buffer, u32 BufferSize)
+_SendPacket(ts_io* Conn)
 {
     Conn->Operation = Op_SendPacket;
-    Conn->IoBuffer = Buffer;
-    Conn->IoBufferSize = BufferSize;
     return PushToWorkQueue(Conn);
 }
 
 internal bool
-_SendFile(ts_io* Conn, file File)
+_SendFile(ts_io* Conn)
 {
-    // TODO: permit file offset?
-    
     Conn->Operation = Op_SendFile;
-    
-    ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    if (Conn->IoBuffer == NULL)
-    {
-        Conn->IoBufferSize = FileSizeOf(File);
-        Conn->IoBuffer = 1; // Value used just so this codepath won't run again.
-        Internal->File = File;
-    }
-    else
-    {
-        // Uses the last BytesTransferred to know how much to advance the pointer.
-        Conn->IoBufferSize -= Conn->BytesTransferred;
-    }
-    
+    return PushToWorkQueue(Conn);
+}
+
+internal bool
+_RecvPacket(ts_io* Conn)
+{
+    Conn->Operation = Op_RecvPacket;
     return PushToWorkQueue(Conn);
 }

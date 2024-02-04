@@ -22,8 +22,6 @@
 // Structs and defines
 //==============================
 
-#define MAX_SOCKADDR_SIZE 28
-
 typedef enum ts_protocol
 {
     Proto_TCPIP4    = 0,
@@ -47,15 +45,18 @@ typedef enum ts_op
     Op_AcceptConn,
     Op_CreateConn,
     Op_DisconnectSocket,
+    Op_TerminateConn,
     Op_RecvPacket,
     Op_SendPacket,
     Op_SendFile,
     Op_SendToIoQueue
 } ts_op;
 
+#define MAX_SOCKADDR_SIZE 28 // Enough for the largest sockaddr struct.
+
 typedef struct ts_sockaddr
 {
-    u8 Addr[MAX_SOCKADDR_SIZE]; // Enough for the largest sockaddr struct.
+    u8 Addr[MAX_SOCKADDR_SIZE];
     u32 Size;
 } ts_sockaddr;
 
@@ -68,9 +69,9 @@ typedef struct ts_listen
 } ts_listen;
 
 #if defined(TT_WINDOWS)
-# define TS_INTERNAL_DATA_SIZE 40 // See tinyserver-win32.c for more info.
+# define TS_INTERNAL_DATA_SIZE 48 // See tinyserver-win32.c for more info.
 #elif defined(TT_LINUX)
-# define TS_INTERNAL_DATA_SIZE 8  // See tinyserver-epoll.c for more info.
+# define TS_INTERNAL_DATA_SIZE 4  // See tinyserver-epoll.c for more info.
 #endif
 
 typedef struct ts_io
@@ -80,8 +81,12 @@ typedef struct ts_io
     ts_status Status;
     ts_op Operation;
     
-    u8* IoBuffer;
-    u32 IoBufferSize;
+    union
+    {
+        u8* IoBuffer;
+        file IoFile;
+    };
+    u32 IoSize;
     u8 InternalData[TS_INTERNAL_DATA_SIZE];
 } ts_io;
 
@@ -100,23 +105,6 @@ external void CloseServer(void);
 
 /* Performs server cleanup and freeing of resources.
 --- Returns: nothing. */
-
-external file OpenNewSocket(ts_protocol Protocol);
-
-/* Creates a new socket for the defined [Protocol].
- |--- Return: valid socket if successful, INVALID_FILE if not. */
-
-external bool CloseSocket(ts_io* Conn);
-
-/* Closes the socket, taking down any pending connection as well (forced shutdown).
-|--- Return: true if successful, false if not. */
-
-external bool BindFileToIoQueue(file File, _opt void* RelatedData);
-
-/* Binds a [File] (socket or regular file) to the IO queue, so IO operations on it
- |  can be dequeued later by called WaitOnIoQueue(). [RelatedData] is an optional
-|  parameter where a pointer can be passed to be dequeued with the handle.
-|--- Return: true if successful, false if not. */
 
 external ts_sockaddr CreateSockAddr(char* IpAddress, u16 Port, ts_protocol Protocol);
 
@@ -165,19 +153,22 @@ bool SendToIoQueue(ts_io* Conn);
 // Socket IO
 //==============================
 
-bool (*AcceptConn)(ts_listen Listening, ts_io* Conn, void* Buffer, u32 BufferSize);
+bool (*AcceptConn)(ts_listen Listening, ts_io* Conn);
 
-/* Accepts an incoming connection on [Listening], assigns it to the socket in [Conn],
- |  and binds that socket to the IO queue. If a socket has not been created yet, the
- |  function creates a new one and assigns it to [Conn]. [Buffer] and [BufferSize] are
- |  used for receiving the first incoming packet of the connection.
+/* Accepts an incoming connection on [Listening], assigns it to [Conn.Socket],
+ |  and binds that socket to the IO queue. Optionally, the user can assign a
+ |  memory buffer to [.IoBuffer] and its size to [.IoSize], and a read will be
+ |  posted immediately upon establishing a connection. If left blank, no such read
+ |  will be performed.
 |--- Return: true if successful, false if not. */
 
-bool (*CreateConn)(ts_io* Conn, ts_sockaddr SockAddr, void* Buffer, u32 BufferSize);
+bool (*CreateConn)(ts_io* Conn, ts_sockaddr SockAddr);
 
 /* Creates a new connection on the socket in [Conn], binding it to the address at
-|  [SockAddr]. This must have been created with CreateSockAddr(). [Buffer] and
- |  [BufferSize] are used for sending the first packet of data right after connection.
+|  [SockAddr], created with CreateSockAddr(). Optionally, the user can assign a
+ |  data buffer to [.IoBuffer] and its size to [.IoSize], and a send will be
+ |  posted immediately upon establishing a connection. If left blank, no such send
+ |  will be performed.
 |--- Return: true if successful, false if not. */
 
 bool (*DisconnectSocket)(ts_io* Conn);
@@ -187,22 +178,34 @@ bool (*DisconnectSocket)(ts_io* Conn);
  |  see if it's still valid.
 |--- Return: true if successful, false if not. */
 
-bool (*SendPacket)(ts_io* Conn, void* Buffer, u32 BufferSize);
+bool (*TerminateConn)(ts_io* Conn);
 
-/* Sends a [Buffer] of [BufferSize] to the socket in [Conn]. The operation happens
-|  asynchronously, and its completion status, as well as number of bytes transmitted,
- |  is gotten by calling WaitOnIoQueue().
+/* Forcefully disconnects the socket in [Conn]. Also guaranteed to close the socket.
+ |  Should only be used upon network error.
+|--- Return: true if successful, false if not. */
+
+bool (*SendPacket)(ts_io* Conn);
+
+/* Sends data to the socket in [Conn]. The user must assign the data to [.IoBuffer]
+|  and the number of bytes to send to [.IoSize] beforehand. The operation happens
+ |  asynchronously, and its completion status, as well as number of bytes
+ |  transmitted, is gotten by calling WaitOnIoQueue().
  |--- Return: true if successful, false if not. */
 
-bool (*SendFile)(ts_io* Conn, file File);
+bool (*SendFile)(ts_io* Conn);
 
-// TODO: escrever doc & funcoes!!!
+/* Sends a file to the socket in [Conn]. The user must assign the file handle to
+ |  [.IoFile] and the number of bytes to send to [.IoSize] by the user. The operation
+ |  happens asynchronously, and its completion status, as well as number of bytes
+ |  transmitted, is gotten by calling WaitOnIoQueue().
+ |--- Return: true if successful, false if not. */
 
-bool (*RecvPacket)(ts_io* Conn, void* Buffer, u32 BufferSize);
+bool (*RecvPacket)(ts_io* Conn);
 
-/* Receives a list of packets into [Buffer] of [BufferSize] from the socket in [Conn].
- |  The operation happens asynchronously, and its completion status, as well as number
- |  of bytes transmitted, is gotten by calling WaitOnIoQueue().
+/* Reads data from the socket in [Conn]. The user must assign a memory buffer to
+ |  [.IoBuffer] and the buffer size to [.IoSize] beforehand. The operation happens
+ |  asynchronously, and its completion status, as well as number of bytes
+ |  transmitted, is gotten by calling WaitOnIoQueue().
  |--- Return: true if successful, false if not. */
 
 
