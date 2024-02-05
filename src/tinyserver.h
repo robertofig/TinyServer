@@ -27,8 +27,8 @@
 //      If the status is Status_Aborted, call DisconnectSocket; if it is
 //      Status_Error, call TerminateConn. The ts_io object can be reused
 //      for further AcceptConn calls.
-//   3) If Status_Connected, perform RecvPacket, SendPacket, or SendFile.
-//      Each operation will be posted again to WaitOnIoQueue, and may or may
+//   3) If Status_Connected, perform RecvData, SendData, or SendFile. Each
+//      operation will be posted again to WaitOnIoQueue, and may or may
 //      not complete upon dequeue. Check [.BytesReceived] how much IO was
 //      performed; adjust [.IoBuffer] and [.IoSize] to post again if needed.
 //   4) Repeat from #1.
@@ -67,8 +67,8 @@ typedef enum ts_op
     Op_CreateConn,
     Op_DisconnectSocket,
     Op_TerminateConn,
-    Op_RecvPacket,
-    Op_SendPacket,
+    Op_RecvData,
+    Op_SendData,
     Op_SendFile,
     Op_SendToIoQueue
 } ts_op;
@@ -97,6 +97,8 @@ typedef struct ts_listen
 
 typedef struct ts_io
 {
+    u8 InternalData[TS_INTERNAL_DATA_SIZE]; // Important: must be first member!
+    
     file Socket;
     usz BytesTransferred;
     ts_status Status;
@@ -108,7 +110,6 @@ typedef struct ts_io
         file IoFile;
     };
     u32 IoSize;
-    u8 InternalData[TS_INTERNAL_DATA_SIZE];
 } ts_io;
 
 
@@ -145,7 +146,7 @@ external bool AddListeningSocket(ts_protocol Protocol, u16 Port);
 // Async events
 //==============================
 
-ts_listen ListenForConnections(void);
+external ts_listen ListenForConnections(void);
 
 /* Polls the added listening sockets to check for connections. Waits indefinitely
  |  until any of the sockets gets signaled. If more than one socket gets signaled at
@@ -154,7 +155,7 @@ ts_listen ListenForConnections(void);
 |--- Return: ts_listen struct, to be passed to AcceptConn(). If this function fails,
 |            the [.Socket] member will be of value INVALID_FILE. */
 
-ts_io* WaitOnIoQueue(void);
+external ts_io* WaitOnIoQueue(void);
 
 /* Waits indefinitely on the IO queue until an event completes. If more than one
  |  event gets dequeued at the same time, returns the first one, and the next ones
@@ -163,7 +164,7 @@ ts_io* WaitOnIoQueue(void);
 |            indicating if the connection is still standing or has been aborted, and
  |            [.BytesTransferred] updated to that of the latest transaction. */
 
-bool SendToIoQueue(ts_io* Conn);
+external bool SendToIoQueue(ts_io* Conn);
 
 /* Sends the socket in [Conn] back to the [IoQueue]. No bytes are transferred
  |  during the operation.
@@ -205,7 +206,7 @@ bool (*TerminateConn)(ts_io* Conn);
  |  Should only be used upon network error.
 |--- Return: true if successful, false if not. */
 
-bool (*SendPacket)(ts_io* Conn);
+bool (*SendData)(ts_io* Conn);
 
 /* Sends data to the socket in [Conn]. The user must assign the data to [.IoBuffer]
 |  and the number of bytes to send to [.IoSize] beforehand. The operation happens
@@ -221,7 +222,7 @@ bool (*SendFile)(ts_io* Conn);
  |  transmitted, is gotten by calling WaitOnIoQueue().
  |--- Return: true if successful, false if not. */
 
-bool (*RecvPacket)(ts_io* Conn);
+bool (*RecvData)(ts_io* Conn);
 
 /* Reads data from the socket in [Conn]. The user must assign a memory buffer to
  |  [.IoBuffer] and the buffer size to [.IoSize] beforehand. The operation happens

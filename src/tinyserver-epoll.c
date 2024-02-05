@@ -16,8 +16,8 @@ internal bool _AcceptConn(ts_listen, ts_io*);
 internal bool _CreateConn(ts_io*, ts_sockaddr);
 internal bool _DisconnectSocket(ts_io*);
 internal bool _TerminateConn(ts_io*);
-internal bool _RecvPacket(ts_io*);
-internal bool _SendPacket(ts_io*);
+internal bool _RecvData(ts_io*);
+internal bool _SendData(ts_io*);
 internal bool _SendFile(ts_io*);
 
 
@@ -165,8 +165,8 @@ InitServer(void)
     CreateConn = _CreateConn;
     DisconnectSocket = _DisconnectSocket;
     TerminateConn = _TerminateConn;
-    RecvPacket = _RecvPacket;
-    SendPacket = _SendPacket;
+    RecvData = _RecvData;
+    SendData = _SendData;
     
     gServerArena = GetMemory(TS_ARENA_SIZE, 0, MEM_WRITE);
     if (!gServerArena.Base)
@@ -283,6 +283,8 @@ AddListeningSocket(ts_protocol Protocol, u16 Port)
             ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
             
             ts_listen* Listen = PushStruct(&gServerArena, ts_listen);
+            ServerInfo->ListenCount++;
+            
             Listen->Socket = Socket;
             Listen->Protocol = Protocol;
             Listen->SockAddrSize = (u32)ListenAddrSize;
@@ -389,7 +391,7 @@ WaitOnIoQueue(void)
                 }
             }
             
-            case Op_RecvPacket:
+            case Op_RecvData:
             {
                 ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
                                                 Conn->IoSize, MSG_DONTWAIT);
@@ -419,7 +421,7 @@ WaitOnIoQueue(void)
                 }
             }
             
-            case Op_SendPacket:
+            case Op_SendData:
             {
                 ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
                                                 Conn->IoSize, MSG_DONTWAIT);
@@ -527,9 +529,9 @@ _TerminateConn(ts_io* Conn)
 }
 
 internal bool
-_SendPacket(ts_io* Conn)
+_SendData(ts_io* Conn)
 {
-    Conn->Operation = Op_SendPacket;
+    Conn->Operation = Op_SendData;
     return PushToWorkQueue(Conn);
 }
 
@@ -541,8 +543,8 @@ _SendFile(ts_io* Conn)
 }
 
 internal bool
-_RecvPacket(ts_io* Conn)
+_RecvData(ts_io* Conn)
 {
-    Conn->Operation = Op_RecvPacket;
+    Conn->Operation = Op_RecvData;
     return PushToWorkQueue(Conn);
 }

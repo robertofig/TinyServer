@@ -199,7 +199,6 @@ typedef struct ts_cookie
 
 typedef struct ts_response
 {
-    char* ServerName; // Must be null-terminated.
     u16 HeaderSize;
     
     u16 StatusCode;
@@ -211,16 +210,19 @@ typedef struct ts_response
     
     char* Payload;
     usz PayloadSize;
-	char* PayloadType;
+	char* MimeType;
+    u8 PayloadIsFile;
 } ts_response;
 
-external void CraftHttpResponseHeader(ts_response* Response, string* OutHeader);
+external void CraftHttpResponseHeader(ts_response* Response, string* OutHeader,
+                                      _opt char* ServerName);
 
 /* Creates HTTP response header based on [Response] data, into [OutHeader].
   |  [OutHeader] must have enough space allocated to accomodate the full
 |  header (about 1KB is enough). If [Response] contains pointer to cookies
 |  and/or payload, these are not written to OutHeader, but rather must
-|  be sent separately.
+|  be sent separately. Optionally, pass in [ServerName] the name that'll be
+|  displayed on the response header (default: TinyServer).
 |--- Return: nothing. */
 
 

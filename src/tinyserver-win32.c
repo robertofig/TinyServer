@@ -8,7 +8,6 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ntdll.lib")
 
-
 //==============================
 // Function pointers
 //==============================
@@ -25,11 +24,11 @@ internal bool _CreateConnSimple(ts_io*, ts_sockaddr);
 internal bool _CreateConnEx(ts_io*, ts_sockaddr);
 internal bool _DisconnectSocketSimple(ts_io*);
 internal bool _DisconnectSocketEx(ts_io*);
-internal bool _SendPacketSimple(ts_io*);
-internal bool _SendPacketEx(ts_io*);
+internal bool _SendDataSimple(ts_io*);
+internal bool _SendDataEx(ts_io*);
 internal bool _SendFileSimple(ts_io*);
 internal bool _SendFileEx(ts_io*);
-internal bool _RecvPacket(ts_io*);
+internal bool _RecvData(ts_io*);
 
 
 //==============================
@@ -44,7 +43,7 @@ thread_local ULONG tCurrentIoEventIdx = -1;
 typedef struct ts_internal
 {
     WSAOVERLAPPED Overlapped;
-    void* Base; // Used on Simple version of SendFile.
+    u8* Base; // Used on Simple version of SendFile.
     u32 FileSize; // Used on Simple version of SendFile.
     u32 SendOffset; // Used on Simple version of SendFile.
 } ts_internal;
@@ -105,6 +104,8 @@ BindFileToIoQueue(file File, _opt void* RelatedData)
 // Setup
 //==============================
 
+#define TS_ARENA_SIZE Kilobyte(1)
+
 external bool
 InitServer(void)
 {
@@ -152,9 +153,9 @@ InitServer(void)
     WSAIoctl(IoctlSocket, SIO_GET_EXTENSION_FUNCTION_POINTER, &GuidTransmitPackets,
              sizeof(GUID), &TSTransmitPackets, sizeof(TSTransmitPackets), &BytesReturned,
              NULL, NULL);
-    SendPacket = ((TSTransmitPackets && gSysInfo.OSVersion[0] == 'S')
-                  ? _SendPacketEx
-                  : _SendPacketSimple);
+    SendData = ((TSTransmitPackets && gSysInfo.OSVersion[0] == 'S')
+                ? _SendDataEx
+                : _SendDataSimple);
     
     // TransmitFile()
     GUID GuidTransmitFile = WSAID_TRANSMITFILE;
@@ -167,18 +168,18 @@ InitServer(void)
     
     closesocket(IoctlSocket);
     
-    RecvPacket = _RecvPacket;
+    RecvData = _RecvData;
     
     // Sets up the internal auxiliary memory arena.
     
-    gServerArena = GetMemory(INIT_ARENA_SIZE, 0, MEM_READ|MEM_WRITE);
+    gServerArena = GetMemory(TS_ARENA_SIZE, 0, MEM_READ|MEM_WRITE);
     if (!gServerArena.Base)
     {
         return false;
     }
-    ts_server_info* ServerInfo = PushStruct(gServerArena, ts_server_info);
+    ts_server_info* ServerInfo = PushStruct(&gServerArena, ts_server_info);
     ServerInfo->IoQueue = CreateIoQueue();
-    ServerInfo->CurrentAcceptIdx = ServerInfo->CurrentIoIdx = USZ_MAX;
+    ServerInfo->CurrentAcceptIdx = USZ_MAX;
     
     return true;
 }
@@ -258,20 +259,20 @@ AddListeningSocket(ts_protocol Protocol, u16 Port)
         {
             ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
             
-            ts_listen* Listen = PushStruct(gServerArena, ts_listen);
-            ServerInfo->SockCount++;
+            ts_listen* Listen = PushStruct(&gServerArena, ts_listen);
+            ServerInfo->ListenCount++;
             
             Listen->Socket = Socket;
             Listen->Event = (file)Event;
             Listen->Protocol = Protocol;
-            Listen.SockAddrSize = (u32)ListenAddrSize;
+            Listen->SockAddrSize = (u32)ListenAddrSize;
             
             Result = BindFileToIoQueue(Socket, Listen);
         }
         else
         {
             closesocket((SOCKET)Socket);
-            WSACloseHandle(Event);
+            CloseHandle(Event);
         }
     }
     
@@ -295,16 +296,16 @@ ListenForConnections(void)
     
     if (!ServerInfo->ReadyToPoll)
     {
-        file* EventPtr = PushArray(gServerArena, ServerInfo->ListenCount, file);
+        file* EventPtr = PushArray(&gServerArena, ServerInfo->ListenCount, file);
         for (usz Idx = 0; Idx < ServerInfo->ListenCount; Idx++)
         {
             EventPtr[Idx] = ListenList[Idx].Event;
         }
-        ServerInfo->AcceptPtr = (u8*)EventPtr;
+        ServerInfo->AcceptEvents = (u8*)EventPtr;
         ServerInfo->ReadyToPoll = true;
     }
     
-    WSAEVENT* EventList = (WSAEVENT*)ServerInfo->AcceptPtr;
+    WSAEVENT* EventList = (WSAEVENT*)ServerInfo->AcceptEvents;
     
     // Event processing happens in two steps: 1) call polling function, 2) test
     // each socket to see if signaled. ListenForConnections() bundles them both
@@ -329,8 +330,8 @@ ListenForConnections(void)
     
     while (ServerInfo->CurrentAcceptIdx < ServerInfo->ListenCount)
     {
-        ts_listen Listen = ListenList[ListenList->CurrentAcceptIdx];
-        WSAEVENT Event = EventList[ListenList->CurrentAcceptIdx++];
+        ts_listen Listen = ListenList[ServerInfo->CurrentAcceptIdx];
+        WSAEVENT Event = EventList[ServerInfo->CurrentAcceptIdx++];
         
         WSANETWORKEVENTS EventType;
         if (WSAEnumNetworkEvents((SOCKET)Listen.Socket, Event, &EventType) == 0
@@ -345,7 +346,7 @@ ListenForConnections(void)
     // If it got here, there is no sockets left to check, meaning we need to call
     // WSAWaitForMultipleEvents() again. Reset [CurrentAcceptIdx] to default.
     
-    ServerInfo->CurrentAcceptIdx == USZ_MAX;
+    ServerInfo->CurrentAcceptIdx = USZ_MAX;
     return ListenForConnections();
 }
 
@@ -372,13 +373,13 @@ WaitOnIoQueue(void)
         OVERLAPPED_ENTRY Event = tIoEvents[tCurrentIoEventIdx++];
         if (Event.lpOverlapped->Internal != STATUS_PENDING)
         {
-            ts_io* Conn = (ts_io*)Event.lpCompletionKey;
+            ts_io* Conn = (ts_io*)Event.lpOverlapped;
             Conn->BytesTransferred = (usz)Event.dwNumberOfBytesTransferred;
             ts_internal* Internal = (ts_internal*)Conn->InternalData;
             
             if (RtlNtStatusToDosError(Internal->Overlapped.Internal) == ERROR_SUCCESS)
             {
-                if (Conn->Operation == Op_RecvPacket
+                if (Conn->Operation == Op_RecvData
                     || Conn->Operation == Op_AcceptConn)
                 {
                     // If the socket is in TCP connection and received 0 bytes,
@@ -421,7 +422,7 @@ WaitOnIoQueue(void)
     // If it got here, there is no sockets left to check, meaning we need to call
     // GetQueuedCompletionStatusEx() again. Reset [CurrentIoEventIdx] to default.
     
-    CurrentIoEventIdx = -1;
+    tCurrentIoEventIdx = -1;
     return WaitOnIoQueue();
 }
 
@@ -432,10 +433,10 @@ SendToIoQueue(ts_io* Conn)
     ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
     
     HANDLE IoCP = (HANDLE)ServerInfo->IoQueue;
-    ULONG_PTR CompletionKey = Conn;
+    ULONG_PTR CompletionKey = (ULONG_PTR)Conn;
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
     BOOL Result = PostQueuedCompletionStatus(IoCP, 0, CompletionKey,
-                                             Internal->Overlapped);
+                                             &Internal->Overlapped);
     return Result;
 }
 
@@ -455,7 +456,7 @@ _AcceptConnSimple(ts_listen Listening, ts_io* Conn)
     SOCKET Socket = WSAAccept((SOCKET)Listening.Socket, (SOCKADDR*)RemoteSockAddr,
                               &RemoteSockAddrSize, NULL, (DWORD_PTR)NULL);
     if (Socket != INVALID_SOCKET
-        && BindFileToIoQueue(Conn->Socket, ServerInfo->IoQueue, Conn))
+        && BindFileToIoQueue(Conn->Socket, Conn))
     {
         Conn->Socket = (file)Socket;
         Conn->Status = Status_Connected;
@@ -469,13 +470,13 @@ _AcceptConnSimple(ts_listen Listening, ts_io* Conn)
             
             WSABUF Element = {0};
             Element.len = Conn->IoSize;
-            Element.buf = Conn->IoBuffer;
+            Element.buf = (CHAR*)Conn->IoBuffer;
             
             ts_internal* Internal = (ts_internal*)Conn->InternalData;
-            memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+            memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
             DWORD Flags = 0;
-            int Result = WSARecv((SOCKET)Conn->Socket, Element, 1, NULL, &Flags,
-                                 Internal->Overlapped, NULL);
+            int Result = WSARecv((SOCKET)Conn->Socket, &Element, 1, NULL, &Flags,
+                                 &Internal->Overlapped, NULL);
             return ((Result == 0) || (WSAGetLastError() == WSA_IO_PENDING));
         }
         return SendToIoQueue(Conn);
@@ -495,7 +496,7 @@ _AcceptConnEx(ts_listen Listening, ts_io* Conn)
     
     file Socket = OpenNewSocket(Listening.Protocol);
     if (Socket != INVALID_FILE
-        && BindFileToIoQueue((SOCKET)Socket, ServerInfo->IoQueue, Conn))
+        && BindFileToIoQueue((SOCKET)Socket, Conn))
     {
         Conn->Socket = Socket;
         Conn->Status = Status_Connected;
@@ -506,11 +507,11 @@ _AcceptConnEx(ts_listen Listening, ts_io* Conn)
         Conn->IoSize -= CombinedAddrSize;
         
         ts_internal* Internal = (ts_internal*)Conn->InternalData;
-        memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+        memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
         DWORD BytesRecv = 0;
         BOOL Result = TSAcceptEx((SOCKET)Listening.Socket, (SOCKET)Conn->Socket,
                                  Conn->IoBuffer, Conn->IoSize, LocalAddrSize,
-                                 RemoteAddrSize, &BytesRecv, Internal->Overlapped);
+                                 RemoteAddrSize, &BytesRecv, &Internal->Overlapped);
         if ((Result == TRUE) || (WSAGetLastError() == WSA_IO_PENDING))
         {
             // Setting it here is not ideal, but the listening socket is necessary.
@@ -535,7 +536,7 @@ _CreateConnSimple(ts_io* Conn, ts_sockaddr SockAddr)
         Conn->Status = Status_Connected;
         if (Conn->IoBuffer)
         {
-            return SendPacket(Conn);
+            return SendData(Conn);
         }
         return SendToIoQueue(Conn);
     }
@@ -548,13 +549,13 @@ _CreateConnEx(ts_io* Conn, ts_sockaddr SockAddr)
 {
     Conn->Operation = Op_CreateConn;
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
     
     Conn->Status = Status_Connected;
     DWORD BytesSent = 0;
     BOOL Result = TSConnectEx((SOCKET)Conn->Socket, (SOCKADDR*)SockAddr.Addr,
                               SockAddr.Size, Conn->IoBuffer, Conn->IoSize,
-                              &BytesSent, Internal->Overlapped);
+                              &BytesSent, &Internal->Overlapped);
     if ((Result == TRUE) || (WSAGetLastError() == WSA_IO_PENDING))
     {
         return true;
@@ -580,11 +581,11 @@ _DisconnectSocketEx(ts_io* Conn)
 {
     Conn->Operation = Op_DisconnectSocket;
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
     
     ts_status PrevStatus = Conn->Status;
     Conn->Status = Status_Disconnected;
-    BOOL Result = TSDisconnectEx((SOCKET)Conn->Socket, Internal->Overlapped,
+    BOOL Result = TSDisconnectEx((SOCKET)Conn->Socket, &Internal->Overlapped,
                                  TF_REUSE_SOCKET, 0);
     if ((Result == TRUE) || (WSAGetLastError() == WSA_IO_PENDING))
     {
@@ -603,25 +604,25 @@ _TerminateConn(ts_io* Conn)
 }
 
 internal bool
-_SendPacketSimple(ts_io* Conn)
+_SendDataSimple(ts_io* Conn)
 {
-    Conn->Operation = Op_SendPacket;
+    Conn->Operation = Op_SendData;
     
     WSABUF Element = {0};
     Element.len = Conn->IoSize;
-    Element.buf = Conn->IoBuffer;
+    Element.buf = (CHAR*)Conn->IoBuffer;
     
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
-    int Result = WSASend((SOCKET)Conn->Socket, Element, 1, NULL, 0,
-                         Internal->Overlapped, NULL);
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    int Result = WSASend((SOCKET)Conn->Socket, &Element, 1, NULL, 0,
+                         &Internal->Overlapped, NULL);
     return ((Result == 0) || (WSAGetLastError() == WSA_IO_PENDING));
 }
 
 internal bool
-_SendPacketEx(ts_io* Conn)
+_SendDataEx(ts_io* Conn)
 {
-    Conn->Operation = Op_SendPacket;
+    Conn->Operation = Op_SendData;
     
     TRANSMIT_PACKETS_ELEMENT Element = {0};
     Element.dwElFlags = TP_ELEMENT_MEMORY;
@@ -629,9 +630,9 @@ _SendPacketEx(ts_io* Conn)
     Element.pBuffer = Conn->IoBuffer;
     
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
-    BOOL Result = TSTransmitPackets((SOCKET)Conn->Socket, Element, 1, 0,
-                                    Internal->Overlapped, TF_USE_KERNEL_APC);
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    BOOL Result = TSTransmitPackets((SOCKET)Conn->Socket, &Element, 1, 0,
+                                    &Internal->Overlapped, TF_USE_KERNEL_APC);
     return ((Result == TRUE) || (WSAGetLastError() == WSA_IO_PENDING));
 }
 
@@ -650,23 +651,25 @@ _SendFileSimple(ts_io* Conn)
     if (Internal->Base == NULL)
     {
         buffer ReadMem = GetMemory(Conn->IoSize, 0, MEM_WRITE);
-        if (!ReadFromFile(Conn->IoFile, ReadMem.Base, ReadMem.Size, 0))
+        if (!ReadFromFile(Conn->IoFile, &ReadMem, Conn->IoSize, 0))
         {
             return false;
         }
-        Element.buf = Internal->Base = ReadMem.Base;
+        Internal->Base = ReadMem.Base;
+        Element.buf = (CHAR*)Internal->Base;
         Element.len = Internal->FileSize = ReadMem.WriteCur;
     }
     else
     {
         u32 Offset = Internal->FileSize - Conn->IoSize;
-        SendBuffer = Internal->Base + Offset;
-        SendBufferSize = Internal->FileSize - Offset;
+        Internal->Base += Offset;
+        Element.buf = (CHAR*)Internal->Base;
+        Element.len = Internal->FileSize -= Offset;
     }
     
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
-    int Result = WSASend((SOCKET)Conn->Socket, Element, 1, NULL, 0,
-                         Internal->Overlapped, NULL);
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    int Result = WSASend((SOCKET)Conn->Socket, &Element, 1, NULL, 0,
+                         &Internal->Overlapped, NULL);
     return ((Result == 0) || (WSAGetLastError() == WSA_IO_PENDING));
 }
 
@@ -676,26 +679,26 @@ _SendFileEx(ts_io* Conn)
     Conn->Operation = Op_SendFile;
     
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
-    BOOL Result = TransmitFile((SOCKET)Conn->Socket, (HANDLE)Conn->IoFile,
-                               Conn->IoSize, 0, Internal->Overlapped, NULL,
-                               TF_USE_KERNEL_APC);
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    BOOL Result = TSTransmitFile((SOCKET)Conn->Socket, (HANDLE)Conn->IoFile,
+                                 Conn->IoSize, 0, &Internal->Overlapped, NULL,
+                                 TF_USE_KERNEL_APC);
     return ((Result == 0) || (WSAGetLastError() == WSA_IO_PENDING));
 }
 
 internal bool
-_RecvPacket(ts_io* Conn)
+_RecvData(ts_io* Conn)
 {
-    Conn->Operation = Op_RecvPacket;
+    Conn->Operation = Op_RecvData;
     
     WSABUF Element = {0};
     Element.len = Conn->IoSize;
-    Element.buf = Conn->IoBuffer;
+    Element.buf = (CHAR*)Conn->IoBuffer;
     
     ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
     DWORD Flags = 0;
-    int Result = WSARecv((SOCKET)Conn->Socket, Element, 1, NULL, &Flags,
-                         Internal->Overlapped, NULL);
+    int Result = WSARecv((SOCKET)Conn->Socket, &Element, 1, NULL, &Flags,
+                         &Internal->Overlapped, NULL);
     return ((Result == 0) || (WSAGetLastError() == WSA_IO_PENDING));
 }
