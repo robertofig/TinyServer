@@ -180,7 +180,7 @@ InitServer(void)
     ServerInfo->AcceptEvents = ServerInfo->IoEvents = (u8*)&ServerInfo[1];
     ServerInfo->CurrentAcceptIdx = USZ_MAX;
     
-    thread IoEventThread = ThreadCreate(IoEventProc, 0, false);
+    thread IoEventThread = InitThread(IoEventProc, 0, false);
     if (!IoEventThread.Handle)
     {
         return false;
@@ -209,7 +209,7 @@ CloseServer(void)
     if (gServerArena.Base)
     {
         ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
-        ThreadKill(&ServerInfo->IoEventThread);
+        KillThread(&ServerInfo->IoEventThread);
         FreeMemory(&ServerInfo->WorkQueueMem);
         sem_destroy((sem_t*)&ServerInfo->WorkSemaphore);
         CloseFileHandle(ServerInfo->AcceptQueue);
@@ -275,8 +275,9 @@ AddListeningSocket(ts_protocol Protocol, u16 Port)
             } break;
         }
         
-        setsockopt(Socket, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
-        setsockopt(Socket, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
+        const int Value = 1;
+        setsockopt(Socket, SOL_SOCKET, SO_REUSEADDR, (const void*)&Value, sizeof(int));
+        setsockopt(Socket, SOL_SOCKET, SO_REUSEPORT, (const void*)&Value, sizeof(int));
         if (bind((int)Socket, (struct sockaddr*)ListenAddr, ListenAddrSize) == 0
             && listen((int)Socket, SOMAXCONN) == 0)
         {
@@ -387,7 +388,7 @@ WaitOnIoQueue(void)
             {
                 if (Conn->IoBuffer == NULL)
                 {
-                    continue; // Ignores the bundled recv.
+                    break; // Ignores the bundled recv.
                 }
             }
             
@@ -415,9 +416,9 @@ WaitOnIoQueue(void)
         {
             case Op_CreateConn:
             {
-                if (Con->IoBuffer == NULL)
+                if (Conn->IoBuffer == NULL)
                 {
-                    continue; // Ignores the bundled send.
+                    break; // Ignores the bundled send.
                 }
             }
             
