@@ -167,6 +167,7 @@ InitServer(void)
     TerminateConn = _TerminateConn;
     RecvData = _RecvData;
     SendData = _SendData;
+    SendFile = _SendFile;
     
     gServerArena = GetMemory(TS_ARENA_SIZE, 0, MEM_WRITE);
     if (!gServerArena.Base)
@@ -380,7 +381,7 @@ WaitOnIoQueue(void)
         Conn->Status = Status_Aborted;
     }
     
-    else if (Internal.EventType & EPOLLIN)
+    else
     {
         switch (Conn->Operation)
         {
@@ -394,26 +395,23 @@ WaitOnIoQueue(void)
             
             case Op_RecvData:
             {
-                ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
-                                                Conn->IoSize, MSG_DONTWAIT);
-                if (BytesTransferred == -1)
+                if (Internal.EventType & EPOLLIN)
                 {
-                    BytesTransferred = 0;
-                    Conn->Status = Status_Error;
+                    ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
+                                                    Conn->IoSize, MSG_DONTWAIT);
+                    if (BytesTransferred == -1)
+                    {
+                        BytesTransferred = 0;
+                        Conn->Status = Status_Error;
+                    }
+                    else if (BytesTransferred == 0)
+                    {
+                        Conn->Status = Status_Aborted;
+                    }
+                    Conn->BytesTransferred = (usz)BytesTransferred;
                 }
-                else if (BytesTransferred == 0)
-                {
-                    Conn->Status = Status_Aborted;
-                }
-                Conn->BytesTransferred = (usz)BytesTransferred;
             } break;
-        }
-    }
-    
-    else if (Internal.EventType & EPOLLOUT)
-    {
-        switch (Conn->Operation)
-        {
+            
             case Op_CreateConn:
             {
                 if (Conn->IoBuffer == NULL)
@@ -424,26 +422,32 @@ WaitOnIoQueue(void)
             
             case Op_SendData:
             {
-                ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
-                                                Conn->IoSize, MSG_DONTWAIT);
-                if (BytesTransferred == -1)
+                if (Internal.EventType & EPOLLOUT)
                 {
-                    BytesTransferred = 0;
-                    Conn->Status = Status_Error;
+                    ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
+                                                    Conn->IoSize, MSG_DONTWAIT);
+                    if (BytesTransferred == -1)
+                    {
+                        BytesTransferred = 0;
+                        Conn->Status = Status_Error;
+                    }
+                    Conn->BytesTransferred = (usz)BytesTransferred;
                 }
-                Conn->BytesTransferred = (usz)BytesTransferred;
             } break;
             
             case Op_SendFile:
             {
-                ssize_t BytesTransferred = sendfile(Conn->Socket, Conn->IoFile, NULL,
-                                                    Conn->IoSize);
-                if (BytesTransferred == -1)
+                if (Internal.EventType & EPOLLOUT)
                 {
-                    BytesTransferred = 0;
-                    Conn->Status = Status_Error;
+                    ssize_t BytesTransferred = sendfile(Conn->Socket, Conn->IoFile, NULL,
+                                                        Conn->IoSize);
+                    if (BytesTransferred == -1)
+                    {
+                        BytesTransferred = 0;
+                        Conn->Status = Status_Error;
+                    }
+                    Conn->BytesTransferred = (usz)BytesTransferred;
                 }
-                Conn->BytesTransferred = (usz)BytesTransferred;
             } break;
         }
     }
