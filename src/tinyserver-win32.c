@@ -22,8 +22,8 @@ internal bool _AcceptConnSimple(ts_listen, ts_io*);
 internal bool _AcceptConnEx(ts_listen, ts_io*);
 internal bool _CreateConnSimple(ts_io*, ts_sockaddr);
 internal bool _CreateConnEx(ts_io*, ts_sockaddr);
-internal bool _DisconnectSocketSimple(ts_io*);
-internal bool _DisconnectSocketEx(ts_io*);
+internal bool _DisconnectSocketSimple(ts_io*, int);
+internal bool _DisconnectSocketEx(ts_io*, int);
 internal bool _SendDataSimple(ts_io*);
 internal bool _SendDataEx(ts_io*);
 internal bool _SendFileSimple(ts_io*);
@@ -565,33 +565,52 @@ _CreateConnEx(ts_io* Conn, ts_sockaddr SockAddr)
 }
 
 internal bool
-_DisconnectSocketSimple(ts_io* Conn)
+_DisconnectSocketSimple(ts_io* Conn, int Type)
 {
     Conn->Operation = Op_DisconnectSocket;
-    if (shutdown((SOCKET)Conn->Socket, SD_BOTH) == 0)
+    if (shutdown((SOCKET)Conn->Socket, Type) == 0)
     {
-        Conn->Status = Status_Disconnected;
-        return CloseSocket(Conn);
+        if (How == TS_DISCONNECT_BOTH)
+        {
+            Conn->Status = Status_Disconnected;
+            return CloseSocket(Conn);
+        }
+        else
+        {
+            Conn->Status = Status_Simplex;
+            return true;
+        }
     }
     return false;
 }
 
 internal bool
-_DisconnectSocketEx(ts_io* Conn)
+_DisconnectSocketEx(ts_io* Conn, int Type)
 {
     Conn->Operation = Op_DisconnectSocket;
-    ts_internal* Internal = (ts_internal*)Conn->InternalData;
-    memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
-    
-    ts_status PrevStatus = Conn->Status;
-    Conn->Status = Status_Disconnected;
-    BOOL Result = TSDisconnectEx((SOCKET)Conn->Socket, &Internal->Overlapped,
-                                 TF_REUSE_SOCKET, 0);
-    if ((Result == TRUE) || (WSAGetLastError() == WSA_IO_PENDING))
+    if (Type == TS_DISCONNECT_BOTH)
     {
+        ts_internal* Internal = (ts_internal*)Conn->InternalData;
+        memset(&Internal->Overlapped, 0, sizeof(WSAOVERLAPPED));
+        
+        ts_status PrevStatus = Conn->Status;
+        Conn->Status = Status_Disconnected;
+        BOOL Result = TSDisconnectEx((SOCKET)Conn->Socket, &Internal->Overlapped,
+                                     TF_REUSE_SOCKET, 0);
+        if ((Result == TRUE) || (WSAGetLastError() == WSA_IO_PENDING))
+        {
+            return true;
+        }
+        Conn->Status = PrevStatus;
+        return false;
+    }
+    
+    else if (shutdown((SOCKET)Conn->Socket, Type) == 0)
+    {
+        Conn->Status = Status_Simplex;
         return true;
     }
-    Conn->Status = PrevStatus;
+    
     return false;
 }
 

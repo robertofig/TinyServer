@@ -14,7 +14,7 @@
 
 internal bool _AcceptConn(ts_listen, ts_io*);
 internal bool _CreateConn(ts_io*, ts_sockaddr);
-internal bool _DisconnectSocket(ts_io*);
+internal bool _DisconnectSocket(ts_io*, int);
 internal bool _TerminateConn(ts_io*);
 internal bool _RecvData(ts_io*);
 internal bool _SendData(ts_io*);
@@ -48,17 +48,6 @@ CreateIoQueue(void)
     }
     
     return Result;
-}
-
-internal bool
-BindFileToIoQueue(file File, file IoQueue, _opt void* RelatedData)
-{
-    int EPoll = (int)IoQueue;
-    struct epoll_event Event = {0};
-    Event.events = EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET;
-    Event.data.ptr = RelatedData;
-    int Result = epoll_ctl(EPoll, EPOLL_CTL_ADD, File, &Event);
-    return (Result == 0);
 }
 
 internal file
@@ -141,6 +130,8 @@ THREAD_PROC(IoEventProc)
             ts_io* Conn = (ts_io*)Event.data.ptr;
             ts_internal* Internal = (ts_internal*)Conn->InternalData;
             Internal->EventType = Event.events;
+            
+            PushToWorkQueue(Conn);
         }
     }
     
@@ -291,7 +282,10 @@ AddListeningSocket(ts_protocol Protocol, u16 Port)
             Listen->Protocol = Protocol;
             Listen->SockAddrSize = (u32)ListenAddrSize;
             
-            if (BindFileToIoQueue(Socket, ServerInfo->AcceptQueue, Listen))
+            struct epoll_event Event = {0};
+            Event.events = EPOLLIN | EPOLLET;
+            Event.data.ptr = (void*)Listen;
+            if (epoll_ctl(ServerInfo->AcceptQueue, EPOLL_CTL_ADD, Socket, &Event) == 0)
             {
                 ServerInfo->ListenCount++;
                 ServerInfo->AcceptEvents += sizeof(ts_listen);
@@ -374,8 +368,7 @@ WaitOnIoQueue(void)
         Conn->Status = Status_Error;
     }
     
-    else if (Internal.EventType & EPOLLRDHUP
-             || Internal.EventType & EPOLLHUP)
+    else if (Internal.EventType & EPOLLHUP) // || Internal.EventType & EPOLLRDHUP)
     {
         Conn->BytesTransferred = 0;
         Conn->Status = Status_Aborted;
@@ -383,73 +376,47 @@ WaitOnIoQueue(void)
     
     else
     {
-        switch (Conn->Operation)
+        if (Conn->Operation == Op_RecvData)
         {
-            case Op_AcceptConn:
+            ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
+                                            Conn->IoSize, MSG_DONTWAIT);
+            if (BytesTransferred == -1)
             {
-                if (Conn->IoBuffer == NULL)
-                {
-                    break; // Ignores the bundled recv.
-                }
+                BytesTransferred = 0;
+                Conn->Status = Status_Error;
             }
-            
-            case Op_RecvData:
+            else if (BytesTransferred == 0)
             {
-                if (Internal.EventType & EPOLLIN)
-                {
-                    ssize_t BytesTransferred = recv(Conn->Socket, Conn->IoBuffer,
-                                                    Conn->IoSize, MSG_DONTWAIT);
-                    if (BytesTransferred == -1)
-                    {
-                        BytesTransferred = 0;
-                        Conn->Status = Status_Error;
-                    }
-                    else if (BytesTransferred == 0)
-                    {
-                        Conn->Status = Status_Aborted;
-                    }
-                    Conn->BytesTransferred = (usz)BytesTransferred;
-                }
-            } break;
-            
-            case Op_CreateConn:
-            {
-                if (Conn->IoBuffer == NULL)
-                {
-                    break; // Ignores the bundled send.
-                }
+                Conn->Status = Status_Aborted;
             }
-            
-            case Op_SendData:
-            {
-                if (Internal.EventType & EPOLLOUT)
-                {
-                    ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
-                                                    Conn->IoSize, MSG_DONTWAIT);
-                    if (BytesTransferred == -1)
-                    {
-                        BytesTransferred = 0;
-                        Conn->Status = Status_Error;
-                    }
-                    Conn->BytesTransferred = (usz)BytesTransferred;
-                }
-            } break;
-            
-            case Op_SendFile:
-            {
-                if (Internal.EventType & EPOLLOUT)
-                {
-                    ssize_t BytesTransferred = sendfile(Conn->Socket, Conn->IoFile, NULL,
-                                                        Conn->IoSize);
-                    if (BytesTransferred == -1)
-                    {
-                        BytesTransferred = 0;
-                        Conn->Status = Status_Error;
-                    }
-                    Conn->BytesTransferred = (usz)BytesTransferred;
-                }
-            } break;
+            Conn->BytesTransferred = (usz)BytesTransferred;
         }
+        
+        else if (Conn->Operation == Op_SendData)
+        {
+            ssize_t BytesTransferred = send(Conn->Socket, Conn->IoBuffer,
+                                            Conn->IoSize, MSG_DONTWAIT);
+            if (BytesTransferred == -1)
+            {
+                BytesTransferred = 0;
+                Conn->Status = Status_Error;
+            }
+            Conn->BytesTransferred = (usz)BytesTransferred;
+        }
+        
+        else if (Conn->Operation == Op_SendFile)
+        {
+            ssize_t BytesTransferred = sendfile(Conn->Socket, Conn->IoFile, NULL,
+                                                Conn->IoSize);
+            if (BytesTransferred == -1)
+            {
+                BytesTransferred = 0;
+                Conn->Status = Status_Error;
+            }
+            Conn->BytesTransferred = (usz)BytesTransferred;
+        }
+        
+        // For other operations, just return the dequeued ts_io.
     }
     
     return Conn;
@@ -477,50 +444,83 @@ _AcceptConn(ts_listen Listening, ts_io* Conn)
     i32 RemoteSockAddrSize;
     int Socket = accept4(Listening.Socket, (struct sockaddr*)RemoteSockAddr,
                          (socklen_t*)&RemoteSockAddrSize, O_NONBLOCK);
-    if (Socket >= 0
-        && BindFileToIoQueue(Socket, ServerInfo->IoQueue, Conn))
+    if (Socket >= 0)
     {
         Conn->Socket = (file)Socket;
         Conn->Status = Status_Connected;
         
-        if (Conn->IoBuffer)
+        struct epoll_event Event = {0};
+        if (epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_ADD, Socket, &Event) == 0)
         {
-            u32 TotalAddrSize = RemoteSockAddrSize + 0x10;
-            u8* AddrBuffer = (u8*)Conn->IoBuffer + Conn->IoSize - TotalAddrSize;
-            CopyData(AddrBuffer, RemoteSockAddrSize, RemoteSockAddr, RemoteSockAddrSize);
-            Conn->IoSize -= TotalAddrSize;
+            if (Conn->IoBuffer)
+            {
+                u32 TotalAddrSize = RemoteSockAddrSize + 0x10;
+                u8* AddrBuffer = (u8*)Conn->IoBuffer + Conn->IoSize - TotalAddrSize;
+                CopyData(AddrBuffer, RemoteSockAddrSize, RemoteSockAddr, RemoteSockAddrSize);
+                Conn->IoSize -= TotalAddrSize;
+                return RecvData(Conn); // Wait for first package.
+            }
+            else
+            {
+                return PushToWorkQueue(Conn); // Just dequeue as accepted.
+            }
         }
-        return PushToWorkQueue(Conn);
+        else
+        {
+            close(Socket);
+        }
     }
     
-    close(Socket);
     Conn->Socket = INVALID_FILE;
     Conn->Status = Status_Error;
     return false;
 }
 
+
 internal bool
 _CreateConn(ts_io* Conn, ts_sockaddr SockAddr)
 {
     Conn->Operation = Op_CreateConn;
+    ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
+    
+    struct epoll_event Event = {0};
     if (connect(Conn->Socket, (const struct sockaddr*)SockAddr.Addr,
-                (socklen_t)SockAddr.Size) == 0)
+                (socklen_t)SockAddr.Size) == 0
+        && epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_ADD, (int)Conn->Socket, &Event) == 0)
     {
         Conn->Status = Status_Connected;
-        return PushToWorkQueue(Conn);
+        if (Conn->IoBuffer)
+        {
+            return SendData(Conn); // Send first package.
+        }
+        else
+        {
+            return PushToWorkQueue(Conn); // Just dequeue as connected.
+        }
     }
+    
+    Conn->Status = Status_Error;
     return false;
 }
 
 internal bool
-_DisconnectSocket(ts_io* Conn)
+_DisconnectSocket(ts_io* Conn, int Type)
 {
     Conn->Operation = Op_DisconnectSocket;
-    if (shutdown(Conn->Socket, SHUT_RDWR) == 0)
+    if (shutdown(Conn->Socket, Type) == 0)
     {
-        ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
-        epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_DEL, Conn->Socket, 0);
-        return CloseSocket(Conn);
+        if (How == TS_DISCONNECT_BOTH)
+        {
+            Conn->Status = Status_Disconnected;
+            ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
+            epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_DEL, Conn->Socket, 0);
+            return CloseSocket(Conn);
+        }
+        else
+        {
+            Conn->Status = Status_Simplex;
+            return true;
+        }
     }
     return false;
 }
@@ -537,19 +537,34 @@ internal bool
 _SendData(ts_io* Conn)
 {
     Conn->Operation = Op_SendData;
-    return PushToWorkQueue(Conn);
+    ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
+    
+    struct epoll_event Event;
+    Event.data.ptr = (void*)Conn;
+    Event.events = EPOLLOUT | EPOLLRDHUP | EPOLLET | EPOLLONESHOT;
+    return (epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_MOD, Conn->Socket, &Event) == 0);
 }
 
 internal bool
 _SendFile(ts_io* Conn)
 {
     Conn->Operation = Op_SendFile;
-    return PushToWorkQueue(Conn);
+    ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
+    
+    struct epoll_event Event;
+    Event.data.ptr = (void*)Conn;
+    Event.events= EPOLLOUT | EPOLLRDHUP | EPOLLET | EPOLLONESHOT;
+    return (epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_MOD, Conn->Socket, &Event) == 0);
 }
 
 internal bool
 _RecvData(ts_io* Conn)
 {
     Conn->Operation = Op_RecvData;
-    return PushToWorkQueue(Conn);
+    ts_server_info* ServerInfo = (ts_server_info*)gServerArena.Base;
+    
+    struct epoll_event Event;
+    Event.data.ptr = (void*)Conn;
+    Event.events= EPOLLIN | EPOLLRDHUP | EPOLLET | EPOLLONESHOT;
+    return (epoll_ctl(ServerInfo->IoQueue, EPOLL_CTL_MOD, Conn->Socket, &Event) == 0);
 }

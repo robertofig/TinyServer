@@ -55,7 +55,8 @@ typedef enum ts_status
 {
     Status_None,
     Status_Disconnected,
-    Status_Connected,
+    Status_Connected, // Connected, can both send and recv (Duplex).
+    Status_Simplex,   // Connected, but only send or recv (Simplex).
     Status_Aborted,
     Status_Error
 } ts_status;
@@ -175,6 +176,10 @@ external bool SendToIoQueue(ts_io* Conn);
 // Socket IO
 //==============================
 
+#define TS_DISCONNECT_RECV 0
+#define TS_DISCONNECT_SEND 1
+#define TS_DISCONNECT_BOTH 2
+
 bool (*AcceptConn)(ts_listen Listening, ts_io* Conn);
 
 /* Accepts an incoming connection on [Listening], assigns it to [Conn.Socket],
@@ -193,11 +198,13 @@ bool (*CreateConn)(ts_io* Conn, ts_sockaddr SockAddr);
  |  will be performed.
 |--- Return: true if successful, false if not. */
 
-bool (*DisconnectSocket)(ts_io* Conn);
+bool (*DisconnectSocket)(ts_io* Conn, int Type);
 
-/* Gracefully disconnects the socket in [Conn]. May leave the socket open for new
- |  connections, depending on the implementation. Check socket handle upon return to
- |  see if it's still valid.
+/* Gracefully disconnects the socket in [Conn]. The [Type] argument should be either
+ |  TS_DISCONNECT_RECV (to close input but leave output open), TS_DISCONNECT_SEND (to
+ |  close output but leave input open), or TS_DISCONNECT_BOTH (to close both ends).
+|  If closed both ends, it may leave the socket open for new connections, depending
+ |  on the implementation (check socket handle upon return to see if it's still valid). 
 |--- Return: true if successful, false if not. */
 
 bool (*TerminateConn)(ts_io* Conn);
